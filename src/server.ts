@@ -279,7 +279,27 @@ app.post("/api/chat", async (req, res) => {
 
 app.use(express.static(publicDirectory, { index: false, maxAge: 0 }));
 
-const errorHandler: ErrorRequestHandler = (error: unknown, _req, res, next) => {
+function redactDiagnosticText(value: string, requestMessage: unknown): string {
+  let redacted = value;
+  if (typeof requestMessage === "string" && requestMessage) {
+    redacted = redacted.split(requestMessage).join("[MENSAJE DE SOLICITUD OMITIDO]");
+  }
+  for (const secret of [
+    process.env.SESSION_SECRET,
+    process.env.MSAL_CLIENT_SECRET,
+    process.env.AZURE_SQL_CONNECTION_STRING,
+  ]) {
+    if (secret) redacted = redacted.split(secret).join("[SECRETO OMITIDO]");
+  }
+  return redacted
+    .replace(/(Bearer\s+)[^\s"'`,;]+/gi, "$1[TOKEN OMITIDO]")
+    .replace(
+      /((?:password|pwd|client_secret|access_token|refresh_token|token)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^;\s,]+)/gi,
+      "$1[SECRETO OMITIDO]",
+    );
+}
+
+const errorHandler: ErrorRequestHandler = (error: unknown, req, res, next) => {
   if (res.headersSent) {
     next(error);
     return;
@@ -295,7 +315,25 @@ const errorHandler: ErrorRequestHandler = (error: unknown, _req, res, next) => {
   }
 
   const errorName = error instanceof Error ? error.name : "UnknownError";
-  console.error("La solicitud de Vitalis falló.", { errorName });
+  if (process.env.NODE_ENV !== "production") {
+    const errorMessage =
+      error instanceof Error ? error.message : String(error);
+    const errorCode =
+      error instanceof Error &&
+      "code" in error &&
+      (typeof error.code === "string" || typeof error.code === "number")
+        ? error.code
+        : undefined;
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    console.error("La solicitud de Vitalis falló.", {
+      errorName,
+      message: redactDiagnosticText(errorMessage, req.body?.message),
+      ...(errorCode === undefined ? {} : { code: errorCode }),
+      ...(errorStack
+        ? { stack: redactDiagnosticText(errorStack, req.body?.message) }
+        : {}),
+    });
+  }
   res.status(500).json({
     error:
       "No se pudo completar la solicitud por una intermitencia del sistema. " +

@@ -1,4 +1,8 @@
-import { AIProjectClient } from "@azure/ai-projects";
+import {
+  AIProjectClient,
+  type AgentDefinitionUnion,
+  type PromptAgentDefinition,
+} from "@azure/ai-projects";
 import { DefaultAzureCredential } from "@azure/identity";
 import type {
   FunctionTool,
@@ -226,6 +230,16 @@ function createAgentClient(agentName: string, project: AIProjectClient) {
   });
 }
 
+function isPromptDefinition(
+  definition: AgentDefinitionUnion,
+): definition is PromptAgentDefinition {
+  return (
+    definition.kind === "prompt" &&
+    "model" in definition &&
+    typeof definition.model === "string"
+  );
+}
+
 export function createAiService(config: AppConfig) {
   const credential = new DefaultAzureCredential();
   const project = new AIProjectClient(config.projectEndpoint, credential, {
@@ -234,7 +248,8 @@ export function createAiService(config: AppConfig) {
       contentRecording: false,
     },
   });
-  const orchestrator = createAgentClient(config.agents.orchestrator, project);
+  const openAIClient = project.getOpenAIClient();
+  let orchestratorDefinitionPromise: Promise<PromptAgentDefinition> | undefined;
   const specialistClients = new Map(
     Object.entries(config.agents)
       .filter(([role]) => role !== "orchestrator")
@@ -243,6 +258,30 @@ export function createAiService(config: AppConfig) {
         createAgentClient(agentName, project),
       ]),
   );
+
+  async function getOrchestratorDefinition(): Promise<PromptAgentDefinition> {
+    if (!orchestratorDefinitionPromise) {
+      const pending = project.agents
+        .get(config.agents.orchestrator)
+        .then((agent) => {
+          const definition = agent.versions.latest.definition;
+          if (!isPromptDefinition(definition)) {
+            throw new TypeError(
+              `El agente ${config.agents.orchestrator} no tiene una definición prompt con modelo configurado.`,
+            );
+          }
+          return definition;
+        });
+      const tracked = pending.catch((error: unknown) => {
+        if (orchestratorDefinitionPromise === tracked) {
+          orchestratorDefinitionPromise = undefined;
+        }
+        throw error;
+      });
+      orchestratorDefinitionPromise = tracked;
+    }
+    return orchestratorDefinitionPromise;
+  }
 
   async function runSpecialist(agentName: string, message: string): Promise<string> {
     const client = specialistClients.get(agentName);
@@ -441,13 +480,19 @@ export function createAiService(config: AppConfig) {
       );
     }
 
+    const definition = await getOrchestratorDefinition();
+    const instructions = [
+      definition.instructions,
+      `Contexto de acceso: rol activo del empleado = ${employee.rol}. Usa exclusivamente herramientas autorizadas para este rol.`,
+    ]
+      .filter((value): value is string => Boolean(value?.trim()))
+      .join("\n\n");
     const threadId =
-      previousThreadId ?? (await orchestrator.conversations.create()).id;
-    let response = await orchestrator.responses.create({
-      input:
-        `[Contexto de acceso: rol activo del empleado = ${employee.rol}. ` +
-        "Usa exclusivamente herramientas autorizadas para este rol.]\n" +
-        message,
+      previousThreadId ?? (await openAIClient.conversations.create()).id;
+    let response = await openAIClient.responses.create({
+      model: definition.model,
+      instructions,
+      input: message,
       conversation: threadId,
       tools: functionTools,
       tool_choice: "auto",
@@ -484,7 +529,9 @@ export function createAiService(config: AppConfig) {
           output,
         });
       }
-      response = await orchestrator.responses.create({
+      response = await openAIClient.responses.create({
+        model: definition.model,
+        instructions,
         input: outputs,
         conversation: threadId,
         tools: functionTools,
