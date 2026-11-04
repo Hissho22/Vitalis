@@ -1,0 +1,9 @@
+.git
+.github
+.streamlit/secrets.toml
+.env
+.env.*
+node_modules
+dist
+tests
+Protocolos

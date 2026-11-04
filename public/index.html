@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#021024">
+    <title>Vitalis - Sistema Hospitalario</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Vitalis, inicio">
+          <span class="brand-mark" aria-hidden="true">V</span>
+          <span>VITALIS</span>
+        </a>
+        <div class="top-actions">
+          <span id="user-badge" class="user-badge" hidden></span>
+          <button id="new-chat" class="button button-quiet" type="button" hidden>
+            Nuevo chat
+          </button>
+          <form id="logout-form" action="/auth/logout" method="post" hidden>
+            <button class="button button-quiet" type="submit">Cerrar sesión</button>
+          </form>
+        </div>
+      </header>
+
+      <section id="welcome" class="welcome" aria-labelledby="page-title">
+        <div class="eyebrow"><span class="status-dot"></span> ASISTENTE HOSPITALARIO MULTIAGENTE</div>
+        <h1 id="page-title">Atención clara.<br><span>Información confiable.</span></h1>
+        <p class="intro">
+          Coordina consultas administrativas, históricas, de seguros, médicas y de farmacia
+          desde un solo espacio.
+        </p>
+        <div class="login-panel">
+          <div class="login-icon" aria-hidden="true">+</div>
+          <div>
+            <h2>Acceso para personal autorizado</h2>
+            <p>Inicia sesión con tu cuenta institucional para continuar.</p>
+          </div>
+          <a id="login-link" class="button button-primary" href="/auth/login">
+            Iniciar sesión
+          </a>
+        </div>
+        <p id="auth-error" class="error-message" role="alert" hidden></p>
+      </section>
+
+      <section id="chat-panel" class="chat-panel" aria-label="Conversación" hidden>
+        <div id="messages" class="messages" aria-live="polite"></div>
+        <form id="chat-form" class="composer">
+          <label class="sr-only" for="message-input">Escribe tu consulta</label>
+          <textarea
+            id="message-input"
+            name="message"
+            rows="1"
+            maxlength="8000"
+            placeholder="Escribe tu consulta aquí..."
+            required
+          ></textarea>
+          <div class="composer-footer">
+            <p>Verifica la información antes de realizar acciones en el expediente.</p>
+            <button id="send-button" class="button button-primary send-button" type="submit">
+              <span>Enviar</span><span aria-hidden="true">↑</span>
+            </button>
+          </div>
+        </form>
+      </section>
+      <footer class="footer">Vitalis <span>·</span> Sistema Hospitalario</footer>
+    </main>
+  </body>
+</html>

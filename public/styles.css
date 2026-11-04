@@ -1,0 +1,387 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #021024;
+  color: #e7f2ff;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --surface: #052659;
+  --surface-raised: #082f68;
+  --line: rgba(125, 160, 202, 0.22);
+  --muted: #9db5d4;
+  --accent: #7da0ca;
+  --text-soft: #c1e8ff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background:
+    radial-gradient(ellipse at 75% 16%, rgba(30, 82, 145, 0.2), transparent 35rem),
+    #021024;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.shell {
+  display: flex;
+  min-height: 100vh;
+  flex-direction: column;
+  width: min(100% - 48px, 1120px);
+  margin: 0 auto;
+}
+
+.topbar {
+  display: flex;
+  min-height: 80px;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand,
+.top-actions {
+  display: flex;
+  align-items: center;
+}
+
+.brand {
+  gap: 12px;
+  color: #e7f2ff;
+  font-size: 0.86rem;
+  font-weight: 750;
+  letter-spacing: 0.18em;
+  text-decoration: none;
+}
+
+.brand-mark,
+.login-icon {
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(193, 232, 255, 0.36);
+  border-radius: 12px;
+  background: rgba(5, 38, 89, 0.75);
+  color: var(--text-soft);
+}
+
+.brand-mark {
+  width: 36px;
+  height: 36px;
+  font-family: Georgia, serif;
+  font-size: 1.15rem;
+}
+
+.top-actions {
+  gap: 14px;
+}
+
+.user-badge {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.button {
+  display: inline-flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 650;
+  text-decoration: none;
+  transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
+}
+
+.button:hover {
+  transform: translateY(-1px);
+}
+
+.button:focus-visible,
+textarea:focus-visible,
+a:focus-visible {
+  outline: 2px solid #c1e8ff;
+  outline-offset: 3px;
+}
+
+.button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+  transform: none;
+}
+
+.button-quiet {
+  padding: 0 14px;
+  border-color: var(--line);
+  background: transparent;
+  color: var(--text-soft);
+}
+
+.button-quiet:hover {
+  background: rgba(125, 160, 202, 0.1);
+}
+
+.button-primary {
+  padding: 0 18px;
+  background: #7da0ca;
+  color: #021024;
+}
+
+.button-primary:hover {
+  background: #a7c7eb;
+}
+
+.welcome {
+  width: min(100%, 790px);
+  margin: auto;
+  padding: 80px 0 88px;
+}
+
+.eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #9db5d4;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #7da0ca;
+  box-shadow: 0 0 14px rgba(125, 160, 202, 0.8);
+}
+
+h1 {
+  margin: 28px 0 16px;
+  font-size: clamp(2.6rem, 7vw, 5rem);
+  font-weight: 650;
+  letter-spacing: -0.065em;
+  line-height: 1.06;
+}
+
+h1 span {
+  color: #7da0ca;
+}
+
+.intro {
+  max-width: 550px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 1.05rem;
+  line-height: 1.7;
+}
+
+.login-panel {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 18px;
+  margin-top: 40px;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(5, 38, 89, 0.88), rgba(5, 38, 89, 0.36));
+}
+
+.login-icon {
+  width: 42px;
+  height: 42px;
+  font-size: 1.5rem;
+}
+
+.login-panel h2 {
+  margin: 0 0 5px;
+  font-size: 0.98rem;
+  font-weight: 650;
+}
+
+.login-panel p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.error-message {
+  margin: 16px 0 0;
+  color: #ffb4a9;
+}
+
+.chat-panel {
+  display: flex;
+  width: min(100%, 830px);
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  align-self: center;
+  padding: 28px 0 20px;
+}
+
+.messages {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+  padding: 8px 0 24px;
+}
+
+.message {
+  max-width: min(88%, 720px);
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(5, 38, 89, 0.74);
+}
+
+.message-user {
+  align-self: flex-end;
+  border-color: rgba(125, 160, 202, 0.34);
+  background: rgba(8, 47, 104, 0.78);
+}
+
+.message-label {
+  display: block;
+  margin-bottom: 8px;
+  color: #7da0ca;
+  font-size: 0.68rem;
+  font-weight: 750;
+  letter-spacing: 0.11em;
+}
+
+.message-content {
+  margin: 0;
+  color: #d7eaff;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.composer {
+  padding: 14px 16px 12px;
+  border: 1px solid rgba(125, 160, 202, 0.38);
+  border-radius: 16px;
+  background: rgba(5, 38, 89, 0.9);
+  box-shadow: 0 14px 48px rgba(0, 0, 0, 0.18);
+}
+
+.composer textarea {
+  display: block;
+  width: 100%;
+  min-height: 34px;
+  max-height: 180px;
+  resize: none;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #e7f2ff;
+  line-height: 1.5;
+}
+
+.composer textarea::placeholder {
+  color: #9db5d4;
+}
+
+.composer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-top: 10px;
+}
+
+.composer-footer p {
+  margin: 0;
+  color: #9db5d4;
+  font-size: 0.74rem;
+}
+
+.send-button {
+  min-width: 92px;
+  min-height: 38px;
+}
+
+.send-button span:last-child {
+  font-size: 1.15rem;
+}
+
+.footer {
+  padding: 18px 0 24px;
+  color: #7590b2;
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.footer span {
+  padding: 0 5px;
+  color: var(--accent);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  clip-path: inset(50%);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+@media (max-width: 640px) {
+  .shell {
+    width: min(100% - 28px, 1120px);
+  }
+
+  .topbar {
+    min-height: 68px;
+  }
+
+  .user-badge {
+    max-width: 145px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .welcome {
+    padding: 64px 0;
+  }
+
+  .login-panel {
+    grid-template-columns: auto 1fr;
+    gap: 14px;
+    padding: 18px;
+  }
+
+  .login-panel .button {
+    grid-column: 1 / -1;
+  }
+
+  .composer-footer p {
+    max-width: 210px;
+    line-height: 1.4;
+  }
+}
