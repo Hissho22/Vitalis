@@ -21,6 +21,7 @@ import {
   obtenerExpedienteMaster,
   PharmacyInventoryError,
   registrarAtencion,
+  normalizeMedicationText,
   type AdmissionInput,
   type PharmacyDeliveryResult,
   type Recipe,
@@ -35,7 +36,7 @@ const AUTHORIZATION_DENIED_RESPONSE =
 const AUTHORIZATION_DENIAL_INSTRUCTION =
   "Si una herramienta es rechazada por autorización, informa con tono profesional y hospitalario que el rol actual no permite acceder a esa información o realizar esa acción y deriva al área correspondiente. No reveles nombres de herramientas, funciones, métodos, tablas, campos, variables, errores internos ni otros detalles de implementación.";
 const MEDICATION_CATALOG_INSTRUCTION =
-  "El catálogo es una referencia factual de insumos, descripciones, indicaciones registradas, claves y stock; no es una guía terapéutica. Admin, Médico y Farmacia deben invocar consultar_catalogo_medicamentos antes de contestar cualquier consulta sobre stock o disponibilidad, presentaciones, claves oficiales o indicaciones registradas. Responde sobre estos datos únicamente con resultados devueltos por la herramienta; no inventes ni infieras datos que no estén registrados. No afirmes que careces de acceso al catálogo o inventario ni que no puedes consultarlos. Médico debe identificar cada receta por clave oficial o nombre exacto de insumo e indicar explícitamente la cantidad total de unidades de inventario prescritas. Calcula esa cantidad solo a partir de una pauta y duración explícitamente establecidas; si falta información para determinarla, no la inventes ni emitas una cantidad. El catálogo no contiene una pauta de dosificación: no deduzcas dosis ni tratamientos personalizados de sus resultados; Médico debe seguir el protocolo clínico aprobado y validar alergias.";
+  "El catálogo es una referencia factual de insumos, descripciones, indicaciones registradas, claves y stock; no es una guía terapéutica. Admin, Médico y Farmacia deben invocar consultar_catalogo_medicamentos antes de contestar cualquier consulta sobre stock o disponibilidad, presentaciones, claves oficiales o indicaciones registradas. Responde sobre estos datos únicamente con resultados devueltos por la herramienta; no inventes ni infieras datos que no estén registrados. No afirmes que careces de acceso al catálogo o inventario ni que no puedes consultarlos. Médico debe identificar cada receta por clave oficial o nombre exacto de insumo e indicar explícitamente la cantidad total de unidades de inventario prescritas. Calcula esa cantidad solo a partir de una pauta y duración explícitamente establecidas; si falta información para determinarla, no la inventes ni emitas una cantidad. El catálogo no contiene una pauta de dosificación: no deduzcas dosis ni tratamientos personalizados de sus resultados; Médico debe seguir el protocolo clínico aprobado y validar alergias. Farmacia únicamente puede dispensar el insumo y la presentación exactamente prescritos para esa atención por el médico tratante; las sustituciones o cambios de formulación están prohibidos. Ante múltiples coincidencias, muestra Clave, Insumo y Descripción de cada candidata, no descuentes stock ni cambies el estatus, y pide confirmar explícitamente la clave que coincide exactamente con la prescripción médica.";
 type JsonRecord = Record<string, unknown>;
 
 export function authorizationDenialResponse(error: unknown): string | undefined {
@@ -274,13 +275,18 @@ const functionTools: FunctionTool[] = [
   ),
   functionTool(
     "gestionar_farmacia",
-    "Consulta pendientes por identificador exacto del paciente, incluso alfanumérico, o registra una entrega solo después de confirmación explícita del empleado, verificando el catálogo y descontando la cantidad prescrita en una transacción.",
+    "Consulta pendientes por identificador exacto del paciente, incluso alfanumérico, o registra una entrega solo después de confirmación física. Dispensa únicamente el insumo/formulación prescritos por el médico para esa atención, sin sustituciones. Si hay varias presentaciones, devuelve candidatos Clave/Insumo/Descripción y requiere confirmación explícita de la clave exacta antes de descontar stock o cambiar el estatus.",
     {
       accion: { type: "string", enum: ["pendientes", "entregar"] },
       nss: stringParameter(
         "Identificador exacto del paciente; se admite texto alfanumérico como DEMO-0001",
       ),
       id_receta: { type: ["integer", "null"] },
+      clave_medicamento: {
+        type: ["string", "null"],
+        description:
+          "Clave oficial confirmada para una receta ambigua; null hasta que Farmacia confirme cuál coincide exactamente con la prescripción médica",
+      },
       confirmar_entrega: { type: "boolean" },
     },
   ),
@@ -390,7 +396,11 @@ export function parseMedicalResult(responseText: string): {
 
 export interface PharmacyOperations {
   listPendingRecipes: typeof listarRecetasPendientes;
-  markRecipeDelivered: typeof marcarRecetaEntregada;
+  markRecipeDelivered: (
+    recipeId: number,
+    nss: string,
+    selectedMedicationKey?: string | null,
+  ) => ReturnType<typeof marcarRecetaEntregada>;
 }
 
 export async function executePharmacyAction(
@@ -408,6 +418,10 @@ export async function executePharmacyAction(
   }
   if (action === "entregar") {
     const recipeId = integerArgument(args, "id_receta");
+    const selectedMedicationKey =
+      args.clave_medicamento === undefined
+        ? null
+        : stringArgument(args, "clave_medicamento", true)?.trim() || null;
     const confirmed = booleanArgument(args, "confirmar_entrega");
     if (recipeId === null) {
       throw new TypeError("Se requiere id_receta para confirmar la entrega.");
@@ -424,9 +438,34 @@ export async function executePharmacyAction(
           `"Confirmo que la entrega física de la receta ${recipeId} ya fue realizada."`,
       });
     }
+    if (selectedMedicationKey) {
+      const requiredSelectionConfirmation = normalizeMedicationText(
+        `Confirmo que la clave ${selectedMedicationKey} corresponde exactamente a la prescripción médica de la receta ${recipeId}`,
+      ).replace(/\s+/g, " ");
+      const normalizedUserMessage = normalizeMedicationText(userMessage).replace(
+        /\s+/g,
+        " ",
+      );
+      if (!normalizedUserMessage.includes(requiredSelectionConfirmation)) {
+        return JSON.stringify({
+          confirmacion_clave_requerida: true,
+          clave_medicamento: selectedMedicationKey,
+          mensaje:
+            `Antes de registrar la entrega, confirma que la clave ${selectedMedicationKey} ` +
+            `coincide exactamente con la prescripción médica de la receta ${recipeId}. ` +
+            `Responde: "Confirmo que la clave ${selectedMedicationKey} corresponde exactamente ` +
+            `a la prescripción médica de la receta ${recipeId}. Confirmo que la entrega física ` +
+            `de la receta ${recipeId} ya fue realizada." No se permiten sustituciones ni cambios de formulación.`,
+        });
+      }
+    }
     let delivery: PharmacyDeliveryResult;
     try {
-      delivery = await operations.markRecipeDelivered(recipeId, nss);
+      delivery = await operations.markRecipeDelivered(
+        recipeId,
+        nss,
+        selectedMedicationKey,
+      );
     } catch (error) {
       if (error instanceof LookupError) {
         return JSON.stringify({
@@ -436,6 +475,20 @@ export async function executePharmacyAction(
         });
       }
       if (error instanceof PharmacyInventoryError) {
+        if (
+          error.code === "medication_selection_required" ||
+          error.code === "medication_ambiguous"
+        ) {
+          return JSON.stringify({
+            entrega_registrada: false,
+            seleccion_clave_requerida: true,
+            candidatos: error.candidates,
+            mensaje:
+              `${error.message} Farmacia debe seleccionar y confirmar la clave oficial ` +
+              `que coincide exactamente con la prescripción médica de la atención asociada. ` +
+              `No sustituya el medicamento ni cambie su formulación.`,
+          });
+        }
         return JSON.stringify({
           entrega_registrada: false,
           mensaje: error.message,

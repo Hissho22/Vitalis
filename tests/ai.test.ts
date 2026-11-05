@@ -8,7 +8,11 @@ import {
   parseMedicalResult,
   runSpecialistResponse,
 } from "../src/ai.js";
-import { LookupError, PharmacyInventoryError } from "../src/db.js";
+import {
+  LookupError,
+  normalizeMedicationText,
+  PharmacyInventoryError,
+} from "../src/db.js";
 import { AuthorizationError, authorizeTool } from "../src/rbac.js";
 
 test("recognizes Azure content-policy blocks without masking other errors", () => {
@@ -140,6 +144,106 @@ test("returns a controlled result when a pharmacy recipe cannot be delivered", a
   assert.match(response.mensaje, /No se registró la entrega/);
 });
 
+test("normalizes medication names without case or accent differences", () => {
+  assert.equal(normalizeMedicationText("LOSARTAN"), "LOSARTAN");
+  assert.equal(
+    normalizeMedicationText("  losartán  "),
+    normalizeMedicationText("LOSARTAN"),
+  );
+});
+
+test("returns medication candidates and requires an explicit prescription-key match", async () => {
+  let markCalls = 0;
+  const candidates = [
+    {
+      clave: "MED-001",
+      insumo: "LOSARTÁN",
+      descripcion: "Tableta 50 mg",
+    },
+    {
+      clave: "MED-002",
+      insumo: "LOSARTÁN E HIDROCLOROTIAZIDA",
+      descripcion: "Tableta 50 mg/12.5 mg",
+    },
+  ];
+  const dependencies = {
+    async listPendingRecipes() {
+      return [];
+    },
+    async markRecipeDelivered(
+      _recipeId: number,
+      _nss: string,
+      selectedKey?: string | null,
+    ) {
+      markCalls += 1;
+      assert.equal(selectedKey, "MED-001");
+      return {
+        medicamento: "LOSARTÁN",
+        clave: "MED-001",
+        cantidad_entregada: 1,
+        stock_restante: 4,
+      };
+    },
+  };
+  const args = {
+    accion: "entregar",
+    nss: "DEMO-0001",
+    id_receta: 42,
+    clave_medicamento: null,
+    confirmar_entrega: true,
+  };
+  const physicalConfirmation =
+    "Confirmo que la entrega física de la receta 42 ya fue realizada.";
+  const response = await executePharmacyAction(
+    args,
+    physicalConfirmation,
+    {
+      ...dependencies,
+      async markRecipeDelivered() {
+        throw new PharmacyInventoryError(
+          "medication_selection_required",
+          "La receta coincide con varias presentaciones.",
+          candidates,
+        );
+      },
+    },
+  );
+  const result = JSON.parse(response) as {
+    entrega_registrada: boolean;
+    seleccion_clave_requerida: boolean;
+    candidatos: typeof candidates;
+    mensaje: string;
+  };
+
+  assert.equal(result.entrega_registrada, false);
+  assert.equal(result.seleccion_clave_requerida, true);
+  assert.deepEqual(result.candidatos, candidates);
+  assert.match(result.mensaje, /coincide exactamente con la prescripción médica/);
+  assert.match(result.mensaje, /No sustituya el medicamento/);
+  assert.equal(markCalls, 0);
+
+  const missingKeyConfirmation = await executePharmacyAction(
+    { ...args, clave_medicamento: "MED-001" },
+    physicalConfirmation,
+    dependencies,
+  );
+  assert.match(missingKeyConfirmation, /confirmacion_clave_requerida/);
+  assert.equal(markCalls, 0);
+
+  const confirmed = await executePharmacyAction(
+    { ...args, clave_medicamento: "MED-001" },
+    `Confirmo que la clave MED-001 corresponde exactamente a la prescripción médica de la receta 42. ${physicalConfirmation}`,
+    dependencies,
+  );
+  const delivered = JSON.parse(confirmed) as {
+    clave: string;
+    estatus_farmacia: string;
+  };
+  assert.equal(markCalls, 1);
+  assert.equal(delivered.clave, "MED-001");
+  assert.equal(delivered.estatus_farmacia, "Entregado");
+});
+
 test("deducts the dispensed quantity from stock when a pharmacy delivery succeeds", async () => {
   let stock = 8;
   let delivered = false;
@@ -169,6 +273,7 @@ test("deducts the dispensed quantity from stock when a pharmacy delivery succeed
         delivered = true;
         return {
           medicamento: "Paracetamol 500 mg",
+          clave: "MED-123",
           cantidad_entregada: quantity,
           stock_restante: stock,
         };
@@ -215,6 +320,7 @@ test("does not register or deduct stock when inventory is insufficient", async (
         delivered = true;
         return {
           medicamento: "Paracetamol 500 mg",
+          clave: "MED-123",
           cantidad_entregada: quantityRequired,
           stock_restante: stock,
         };

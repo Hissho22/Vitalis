@@ -47,6 +47,8 @@ El Orquestador coordina la atención y delega tareas a los especialistas. No sus
 - Farmacia puede consultar el catálogo para verificar el stock registrado o localizar la clave oficial de un insumo; comunica el stock como dato registrado, sin inferir disponibilidad distinta.
 - Cada receta debe identificar el medicamento mediante su clave oficial o el nombre exacto de `Insumo`, e incluir `cantidad` como entero positivo de unidades de inventario prescritas. Esta cantidad debe corresponder a la unidad que contabiliza `stock` en el catálogo.
 - Solo después de que el empleado confirme la entrega física, Farmacia verifica el insumo y su stock. En una única transacción, descuenta la cantidad prescrita y cambia el estatus a `Entregado`; si el stock es insuficiente, el insumo no es inequívoco o falta la cantidad, no modifica ninguno de los dos registros y comunica el motivo.
+- La búsqueda del catálogo ignora diferencias de mayúsculas y acentos. Si devuelve varias claves o presentaciones, muestra cada candidata con `Clave`, `Insumo` y `Descripción`, solicita confirmación explícita de cuál coincide exactamente con la prescripción y no registra la entrega antes de confirmarla.
+- Solo se dispensa el insumo y la formulación prescritos por el médico tratante en la atención asociada. Está prohibido sustituir el medicamento o cambiar su formulación.
 - Las recetas históricas sin cantidad explícita no se pueden surtir automáticamente: deben actualizarse antes de registrar la entrega.
 - No valida alergias, no recomienda tratamientos ni sustituciones y no afirma que se entregó un medicamento sin confirmación y resultado exitoso de la actualización.
 

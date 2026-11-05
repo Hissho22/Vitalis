@@ -35,14 +35,22 @@ export interface Recipe {
 
 export interface PharmacyDeliveryResult {
   medicamento: string;
+  clave: string;
   cantidad_entregada: number;
   stock_restante: number;
+}
+
+export interface PharmacyMedicationCandidate {
+  clave: string;
+  insumo: string | null;
+  descripcion: string | null;
 }
 
 export type PharmacyInventoryErrorCode =
   | "quantity_missing"
   | "medication_not_found"
   | "medication_ambiguous"
+  | "medication_selection_required"
   | "stock_unavailable"
   | "insufficient_stock";
 
@@ -50,10 +58,19 @@ export class PharmacyInventoryError extends Error {
   constructor(
     readonly code: PharmacyInventoryErrorCode,
     message: string,
+    readonly candidates: PharmacyMedicationCandidate[] = [],
   ) {
     super(message);
     this.name = "PharmacyInventoryError";
   }
+}
+
+export function normalizeMedicationText(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLocaleUpperCase("es-MX");
 }
 
 export interface MedicationCatalogItem {
@@ -310,9 +327,12 @@ export async function buscarCatalogoMedicamentos(
       FROM dbo.medicamentos
       WHERE (
           @termino = N''
-          OR [Insumo] LIKE N'%' + @termino + N'%'
-          OR [Descripción] LIKE N'%' + @termino + N'%'
-          OR [Indicaciones] LIKE N'%' + @termino + N'%'
+          OR [Insumo] COLLATE Modern_Spanish_CI_AI LIKE
+             (N'%' + @termino + N'%') COLLATE Modern_Spanish_CI_AI
+          OR [Descripción] COLLATE Modern_Spanish_CI_AI LIKE
+             (N'%' + @termino + N'%') COLLATE Modern_Spanish_CI_AI
+          OR [Indicaciones] COLLATE Modern_Spanish_CI_AI LIKE
+             (N'%' + @termino + N'%') COLLATE Modern_Spanish_CI_AI
         )
         AND (@clave IS NULL OR [Clave] = @clave)
       ORDER BY
@@ -622,11 +642,16 @@ export async function listarRecetasPendientes(
 export async function marcarRecetaEntregada(
   idReceta: number,
   nss: string,
+  selectedMedicationKey: string | null = null,
 ): Promise<PharmacyDeliveryResult> {
   if (!Number.isInteger(idReceta) || idReceta <= 0) {
     throw new TypeError("El ID de receta debe ser positivo.");
   }
   const key = requiredText(nss, "El NSS");
+  const medicationKey = selectedMedicationKey?.trim() || null;
+  if (medicationKey && medicationKey.length > 255) {
+    throw new TypeError("La clave del medicamento excede 255 caracteres.");
+  }
   return runTransaction(async (transaction) => {
     const recipeRequest = transaction.request();
     recipeRequest.input("idReceta", sql.Int, idReceta);
@@ -658,52 +683,89 @@ export async function marcarRecetaEntregada(
         "No se registró la entrega porque la receta no tiene una cantidad válida. Solicite que se actualice antes de surtirla.",
       );
     }
-
+    if (!recipe.medicamento.trim() || recipe.medicamento.length > 500) {
+      throw new PharmacyInventoryError(
+        "medication_not_found",
+        "No se registró la entrega porque el medicamento de la receta no es válido. Solicite revisión de la prescripción.",
+      );
+    }
     const medicationRequest = transaction.request();
     medicationRequest.input("medicamento", stringType, recipe.medicamento.trim());
+    medicationRequest.input("selectedKey", stringType, medicationKey);
     const medicationResult = await medicationRequest.query<{
       id: number;
       clave: string;
       insumo: string | null;
+      descripcion: string | null;
       stock: number | null;
     }>(`
-      SELECT TOP (2)
+      SELECT TOP (11)
         id,
         [Clave] AS clave,
         [Insumo] AS insumo,
+        [Descripción] AS descripcion,
         [stock] AS stock
       FROM dbo.medicamentos WITH (UPDLOCK, HOLDLOCK)
-      WHERE [Clave] = @medicamento
-        OR UPPER(LTRIM(RTRIM([Insumo]))) =
-           UPPER(LTRIM(RTRIM(@medicamento)))
-      ORDER BY CASE WHEN [Clave] = @medicamento THEN 0 ELSE 1 END;
+      WHERE (
+          [Clave] COLLATE Modern_Spanish_CI_AI =
+             @medicamento COLLATE Modern_Spanish_CI_AI
+          OR [Insumo] COLLATE Modern_Spanish_CI_AI LIKE
+             (N'%' + @medicamento + N'%') COLLATE Modern_Spanish_CI_AI
+          OR [Descripción] COLLATE Modern_Spanish_CI_AI LIKE
+             (N'%' + @medicamento + N'%') COLLATE Modern_Spanish_CI_AI
+        )
+        AND (
+          @selectedKey IS NULL
+          OR [Clave] COLLATE Modern_Spanish_CI_AI =
+             @selectedKey COLLATE Modern_Spanish_CI_AI
+        )
+      ORDER BY
+        CASE WHEN [Clave] COLLATE Modern_Spanish_CI_AI =
+          @medicamento COLLATE Modern_Spanish_CI_AI THEN 0 ELSE 1 END,
+        [Clave];
     `);
     const inventoryRows = medicationResult.recordset;
-    const keyMatches = inventoryRows.filter(
-      (item) =>
-        item.clave.trim().toUpperCase() === recipe.medicamento.trim().toUpperCase(),
-    );
-    const nameMatches = inventoryRows.filter(
-      (item) =>
-        item.insumo?.trim().toUpperCase() ===
-        recipe.medicamento.trim().toUpperCase(),
-    );
-    const medication =
-      keyMatches.length === 1
-        ? keyMatches[0]
-        : keyMatches.length === 0 && nameMatches.length === 1
-          ? nameMatches[0]
-          : undefined;
-    if (keyMatches.length > 1 || (!keyMatches.length && nameMatches.length > 1)) {
+    const candidateList = inventoryRows.map((item) => ({
+      clave: item.clave,
+      insumo: item.insumo,
+      descripcion: item.descripcion,
+    }));
+    if (inventoryRows.length > 10) {
       throw new PharmacyInventoryError(
         "medication_ambiguous",
-        "No se registró la entrega porque el nombre coincide con varios insumos. Verifique la clave oficial antes de surtirla.",
+        "La búsqueda encontró demasiadas presentaciones para seleccionar con seguridad. No se registró la entrega; refine la búsqueda por la clave oficial o el nombre prescrito.",
+        candidateList.slice(0, 10),
       );
     }
+    if (!selectedMedicationKey && inventoryRows.length > 0) {
+      const exactNameMatches = inventoryRows.filter(
+        (item) =>
+          normalizeMedicationText(item.insumo ?? "") ===
+          normalizeMedicationText(recipe.medicamento),
+      );
+      if (inventoryRows.length !== 1 || exactNameMatches.length !== 1) {
+        throw new PharmacyInventoryError(
+          "medication_selection_required",
+          "La receta coincide con más de una presentación o no identifica exactamente un insumo. No se registró la entrega. Revise las opciones y confirme la clave que coincide exactamente con la prescripción médica.",
+          candidateList,
+        );
+      }
+    }
+    const medication = inventoryRows[0];
     if (!medication) {
       throw new PharmacyInventoryError(
         "medication_not_found",
         "No se registró la entrega porque el medicamento no coincide con un insumo del catálogo. Verifique su clave o nombre.",
+      );
+    }
+    if (
+      selectedMedicationKey &&
+      normalizeMedicationText(medication.clave) !==
+        normalizeMedicationText(selectedMedicationKey)
+    ) {
+      throw new PharmacyInventoryError(
+        "medication_not_found",
+        "La clave seleccionada no coincide con un insumo candidato de esta receta. No se registró la entrega.",
       );
     }
     if (
@@ -762,6 +824,7 @@ export async function marcarRecetaEntregada(
 
     return {
       medicamento: medication.insumo?.trim() || medication.clave,
+      clave: medication.clave,
       cantidad_entregada: recipe.cantidad,
       stock_restante: stockRestante,
     };
