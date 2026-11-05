@@ -25,13 +25,13 @@
 ## 4. Esquema de Base de Datos (Azure SQL)
 El backend opera sobre 6 tablas físicas normalizadas y 1 vista de lectura consolidada:
 
-1. **`admision`**: `nss` (PK), `nombre`, `telefono`, `contacto_emergencia`, `telefono_emergencia`.
+1. **`admision`**: `nss` (PK), `nombre`, `telefono`, `contacto_emergencia`, `parentesco`, `telefono_emergencia`.
 2. **`historicos`**: `nss` (PK/FK), `fecha_nacimiento`, `sexo`, `tipo_sangre`, `alergias`, `enfermedades_cronicas`, `cirugias_previas`, `antecedentes_familiares`, `habitos_toxicologias`, `discapacidades_dispositivos`.
 3. **`seguros`**: `id_seguro` (PK), `nss` (FK), `aseguradora`, `estatus` ('Activa', 'Vencida', 'Suspendida').
 4. **`atencion`**: `id_atencion` (PK, IDENTITY), `nss` (FK), `fecha_hora`, `motivo_consulta`, `signos_vitales`, `notas_medicas`, `diagnostico`.
 5. **`farmacia`**: `id_receta` (PK, IDENTITY), `id_atencion` (FK), `medicamento`, `dosis_y_tiempo`, `cantidad` (entero positivo de unidades de inventario prescritas, nullable solo para recetas históricas), `estatus_farmacia` ('Pendiente', 'Entregado'). La migración `scripts/migrations/20261105_agregar_cantidad_receta.sql` agrega la columna y su restricción.
 6. **`empleados`**: `id_empleado` (PK), `nombre`, `correo`, `rol` ('Admin', 'Admision', 'Medico', 'Farmacia', 'Seguros'), `estatus`.
-7. **Vista `master`**: `SELECT` consolidado con `LEFT JOIN` de las tablas de pacientes para lectura rápida de expediente clínico en una sola consulta.
+7. **Vista `master`**: `SELECT` consolidado con `LEFT JOIN` de las tablas de pacientes; incluye `parentesco` de admisión y `cantidad` de farmacia.
 
 ---
 

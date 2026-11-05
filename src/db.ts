@@ -14,6 +14,7 @@ export interface AdmissionInput {
   nombre: string;
   telefono: string | null;
   contacto_emergencia: string | null;
+  parentesco: string | null;
   telefono_emergencia: string | null;
   fecha_nacimiento: string | null;
   sexo: string | null;
@@ -328,7 +329,8 @@ export async function buscarAdmision(
   const key = requiredText(identifier, "El NSS o nombre");
   const result = await rows<PatientRecord>(
     `
-      SELECT nss, nombre, telefono, contacto_emergencia, telefono_emergencia
+      SELECT nss, nombre, telefono, contacto_emergencia, parentesco,
+             telefono_emergencia
       FROM dbo.admision
       WHERE nss = @identifier OR nombre = @identifier
       ORDER BY nss;
@@ -365,12 +367,15 @@ export async function crearAdmision(
     admission.input("nombre", stringType, nombre);
     admission.input("telefono", stringType, input.telefono);
     admission.input("contactoEmergencia", stringType, input.contacto_emergencia);
+    admission.input("parentesco", sql.NVarChar(50), input.parentesco);
     admission.input("telefonoEmergencia", stringType, input.telefono_emergencia);
     await admission.query(`
       INSERT INTO dbo.admision
-        (nss, nombre, telefono, contacto_emergencia, telefono_emergencia)
+        (nss, nombre, telefono, contacto_emergencia, parentesco,
+         telefono_emergencia)
       VALUES
-        (@nss, @nombre, @telefono, @contactoEmergencia, @telefonoEmergencia);
+        (@nss, @nombre, @telefono, @contactoEmergencia, @parentesco,
+         @telefonoEmergencia);
     `);
 
     const history = transaction.request();
@@ -422,6 +427,7 @@ export async function obtenerExpedienteMaster(
     "nombre",
     "telefono",
     "contacto_emergencia",
+    "parentesco",
     "telefono_emergencia",
   ]);
   const historyFields = new Set([
@@ -453,6 +459,7 @@ export async function obtenerExpedienteMaster(
     "id_receta",
     "medicamento",
     "dosis_y_tiempo",
+    "cantidad",
     "estatus_farmacia",
   ]);
   const project = (

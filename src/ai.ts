@@ -192,6 +192,7 @@ const admissionProperties: Record<string, unknown> = {
 for (const field of [
   "telefono",
   "contacto_emergencia",
+  "parentesco",
   "telefono_emergencia",
   "fecha_nacimiento",
   "sexo",
@@ -221,7 +222,7 @@ const functionTools: FunctionTool[] = [
   ),
   functionTool(
     "registrar_admision",
-    "Crea admisión e historial usando únicamente datos confirmados por Admisión.",
+    "Crea admisión e historial usando únicamente datos confirmados por Admisión. Incluye parentesco del contacto de emergencia cuando se haya proporcionado; no lo infieras.",
     admissionProperties,
   ),
   functionTool(
@@ -571,6 +572,7 @@ export function createAiService(config: AppConfig) {
           nombre: stringArgument(args, "nombre")!,
           telefono: stringArgument(args, "telefono", true),
           contacto_emergencia: stringArgument(args, "contacto_emergencia", true),
+          parentesco: stringArgument(args, "parentesco", true),
           telefono_emergencia: stringArgument(args, "telefono_emergencia", true),
           fecha_nacimiento: stringArgument(args, "fecha_nacimiento", true),
           sexo: stringArgument(args, "sexo", true),

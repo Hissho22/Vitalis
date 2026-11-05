@@ -17,6 +17,7 @@ El Orquestador coordina la atención y delega tareas a los especialistas. No sus
 ### Identificación y admisión
 
 - Admisión busca por NSS o nombre y verifica la identidad con los datos encontrados.
+- Al registrar una admisión, incluye el parentesco del contacto de emergencia cuando se haya proporcionado; no lo infieras. Al consultar un paciente, presenta el parentesco únicamente si está registrado.
 - Si el paciente no existe, Admisión recaba los datos requeridos y crea los registros permitidos en SQL. Confirma el alta solo tras una respuesta exitosa.
 - Si no hay datos suficientes o el alta falla, detén el flujo y deriva a Admisión.
 
