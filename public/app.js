@@ -63,7 +63,7 @@ function initialsFor(name) {
     .join("");
 }
 
-function addMessage(role, content, renderedHtml) {
+function addMessage(role, content, renderedHtml, confirmationRequest) {
   const article = document.createElement("article");
   article.className = `message message-${role}`;
   const label = document.createElement("span");
@@ -77,9 +77,77 @@ function addMessage(role, content, renderedHtml) {
     body.textContent = content;
   }
   article.append(label, body);
+  if (role === "assistant" && confirmationRequest) {
+    article.append(buildConfirmation(confirmationRequest));
+  }
   messages.append(article);
   updateConversationView();
   article.scrollIntoView({ behavior: "smooth", block: "end" });
+}
+
+function buildConfirmation(confirmationRequest) {
+  const container = document.createElement("div");
+  const title = document.createElement("p");
+  title.className = "confirmation-title";
+  title.textContent = confirmationRequest.title;
+  const actions = document.createElement("div");
+  actions.className = "confirmation-actions";
+  const confirmButton = document.createElement("button");
+  confirmButton.type = "button";
+  confirmButton.className = "button button-primary";
+  confirmButton.textContent = `[ ${confirmationRequest.confirmLabel} ]`;
+  const cancelButton = document.createElement("button");
+  cancelButton.type = "button";
+  cancelButton.className = "button button-secondary";
+  cancelButton.textContent = `[ ${confirmationRequest.cancelLabel} ]`;
+  const buttons = [confirmButton, cancelButton];
+
+  confirmButton.addEventListener("click", async () => {
+    buttons.forEach((button) => (button.disabled = true));
+    setBusy(true);
+    const userText = confirmationRequest.confirmLabel;
+    prepareHistoryForUserMessage(userText);
+    addHistoryMessage("user", userText);
+    addMessage("user", userText);
+    try {
+      const result = await request("/api/chat", {
+        method: "POST",
+        body: JSON.stringify({ confirmation: confirmationRequest.actionPayload }),
+      });
+      addHistoryMessage("assistant", result.response);
+      addMessage("assistant", result.response, result.html);
+    } catch (error) {
+      if (error.status === 401) {
+        window.location.assign("/auth/login");
+        return;
+      }
+      addHistoryMessage("assistant", error.message);
+      showError(error.message);
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  cancelButton.addEventListener("click", () => {
+    buttons.forEach((button) => (button.disabled = true));
+    const reply = "Acción cancelada. No se realizó ningún cambio.";
+    prepareHistoryForUserMessage(confirmationRequest.cancelLabel);
+    addHistoryMessage("user", confirmationRequest.cancelLabel);
+    addMessage("user", confirmationRequest.cancelLabel);
+    addHistoryMessage("assistant", reply);
+    addMessage("assistant", reply);
+  });
+
+  actions.append(...buttons);
+  container.append(title, actions);
+  return container;
+}
+
+function setBusy(busy) {
+  sendButton.disabled = busy;
+  sendButton.setAttribute("aria-busy", String(busy));
+  sendButton.setAttribute("aria-label", busy ? "Procesando mensaje" : "Enviar mensaje");
+  if (!busy) messageInput.focus();
 }
 
 function showError(message) {
@@ -147,16 +215,14 @@ chatForm.addEventListener("submit", async (event) => {
   addHistoryMessage("user", message);
   addMessage("user", message);
   messageInput.value = "";
-  sendButton.disabled = true;
-  sendButton.setAttribute("aria-busy", "true");
-  sendButton.setAttribute("aria-label", "Procesando mensaje");
+  setBusy(true);
   try {
     const result = await request("/api/chat", {
       method: "POST",
       body: JSON.stringify({ message, messages: conversationHistory }),
     });
     addHistoryMessage("assistant", result.response);
-    addMessage("assistant", result.response, result.html);
+    addMessage("assistant", result.response, result.html, result.confirmationRequest);
   } catch (error) {
     if (error.status === 401) {
       window.location.assign("/auth/login");
@@ -165,10 +231,7 @@ chatForm.addEventListener("submit", async (event) => {
     addHistoryMessage("assistant", error.message);
     showError(error.message);
   } finally {
-    sendButton.disabled = false;
-    sendButton.setAttribute("aria-busy", "false");
-    sendButton.setAttribute("aria-label", "Enviar mensaje");
-    messageInput.focus();
+    setBusy(false);
   }
 });
 

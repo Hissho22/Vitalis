@@ -468,6 +468,18 @@ a:focus-visible {
   white-space: pre-wrap;
 }
 
+.confirmation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.confirmation-title {
+  margin: 12px 0 0;
+  font-weight: 600;
+}
+
 .composer {
   display: flex;
   align-items: flex-end;

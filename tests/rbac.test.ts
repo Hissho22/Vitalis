@@ -25,7 +25,12 @@ const accessByRole: Record<string, string[]> = {
     "consultar_historico",
     "obtener_expediente_master",
   ],
-  Farmacia: ["gestionar_farmacia", "consultar_catalogo_medicamentos"],
+  Farmacia: [
+    "gestionar_farmacia",
+    "consultar_catalogo_medicamentos",
+    "consultar_inventario_stock",
+  ],
+  Historicos: ["registrar_o_actualizar_historico"],
   Seguros: ["validar_poliza"],
   Finanzas: ["validar_poliza"],
 };

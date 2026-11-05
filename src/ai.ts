@@ -13,16 +13,20 @@ import {
   buscarCatalogoMedicamentos,
   buscarAdmision,
   consultarEmpleadoPorEntraId,
+  consultarInventarioStock,
   consultarSeguros,
   crearAdmision,
   listarRecetasPendientes,
   LookupError,
   marcarRecetaEntregada,
   obtenerExpedienteMaster,
+  parseStockQuery,
   PharmacyInventoryError,
   registrarAtencion,
+  registrarOActualizarHistorico,
   normalizeMedicationText,
   type AdmissionInput,
+  type HistoricalInput,
   type PharmacyDeliveryResult,
   type Recipe,
 } from "./db.js";
@@ -34,7 +38,7 @@ const CONTENT_POLICY_RESPONSE =
 const AUTHORIZATION_DENIED_RESPONSE =
   "Su rol actual no cuenta con autorización para acceder a esta información o realizar esta acción clínica. Por favor, remítase a las tareas correspondientes a su área asignada.";
 const AUTHORIZATION_DENIAL_INSTRUCTION =
-  "Si una herramienta es rechazada por autorización, informa con tono profesional y hospitalario que el rol actual no permite acceder a esa información o realizar esa acción y deriva al área correspondiente. No reveles nombres de herramientas, funciones, métodos, tablas, campos, variables, errores internos ni otros detalles de implementación.";
+  "Si una herramienta es rechazada por autorización, informa con tono profesional y hospitalario que el rol actual no permite acceder a esa información o realizar esa acción y deriva al área correspondiente. No reveles nombres de herramientas, funciones, métodos, tablas, campos, variables, errores internos ni otros detalles de implementación. Para preguntas sobre medicamentos con mayor o menor stock usa consultar_inventario_stock. Cuando gestionar_farmacia devuelva confirmationRequest, indica brevemente que debe confirmarse con los botones mostrados; no pidas que el usuario escriba frases de confirmación.";
 const MEDICATION_CATALOG_INSTRUCTION =
   "El catálogo es una referencia factual de insumos, descripciones, indicaciones registradas, claves y stock; no es una guía terapéutica. Admin, Médico y Farmacia deben invocar consultar_catalogo_medicamentos antes de contestar cualquier consulta sobre stock o disponibilidad, presentaciones, claves oficiales o indicaciones registradas. Responde sobre estos datos únicamente con resultados devueltos por la herramienta; no inventes ni infieras datos que no estén registrados. No afirmes que careces de acceso al catálogo o inventario ni que no puedes consultarlos. Médico debe identificar cada receta por clave oficial o nombre exacto de insumo e indicar explícitamente la cantidad total de unidades de inventario prescritas. Calcula esa cantidad solo a partir de una pauta y duración explícitamente establecidas; si falta información para determinarla, no la inventes ni emitas una cantidad. El catálogo no contiene una pauta de dosificación: no deduzcas dosis ni tratamientos personalizados de sus resultados; Médico debe seguir el protocolo clínico aprobado y validar alergias. Farmacia únicamente puede dispensar el insumo y la presentación exactamente prescritos para esa atención por el médico tratante; las sustituciones o cambios de formulación están prohibidos. Ante múltiples coincidencias, muestra Clave, Insumo y Descripción de cada candidata, no descuentes stock ni cambies el estatus, y pide confirmar explícitamente la clave que coincide exactamente con la prescripción médica.";
 type JsonRecord = Record<string, unknown>;
@@ -48,6 +52,61 @@ export function authorizationDenialResponse(error: unknown): string | undefined 
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+}
+
+export interface ConfirmationRequest {
+  title: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  actionPayload: unknown;
+}
+
+export interface ChatResult {
+  response: string;
+  confirmationRequest?: ConfirmationRequest;
+}
+
+export function extractConfirmationRequest(
+  output: string,
+): ConfirmationRequest | undefined {
+  try {
+    const request = asRecord(asRecord(JSON.parse(output))?.confirmationRequest);
+    if (
+      request &&
+      typeof request.title === "string" &&
+      typeof request.confirmLabel === "string" &&
+      typeof request.cancelLabel === "string" &&
+      "actionPayload" in request
+    ) {
+      return request as unknown as ConfirmationRequest;
+    }
+  } catch {
+    // La salida de otras herramientas puede no ser JSON.
+  }
+  return undefined;
+}
+
+export function formatPharmacyConfirmationResult(output: string): string {
+  const result = asRecord(JSON.parse(output)) ?? {};
+  if (typeof result.cantidad_entregada === "number") {
+    return (
+      `Entrega registrada: receta ${String(result.id_receta)}, ` +
+      `${String(result.medicamento)} (clave ${String(result.clave)}), ` +
+      `${result.cantidad_entregada} unidad(es). Stock restante: ${String(result.stock_restante)}.`
+    );
+  }
+  const message =
+    typeof result.mensaje === "string" ? result.mensaje : "No se registró la entrega.";
+  if (Array.isArray(result.candidatos)) {
+    const candidates = result.candidatos
+      .map((item) => {
+        const candidate = asRecord(item) ?? {};
+        return `- ${String(candidate.clave)} | ${String(candidate.insumo)} | ${String(candidate.descripcion)}`;
+      })
+      .join("\n");
+    return `${message}\n${candidates}`;
+  }
+  return message;
 }
 
 function asRecord(value: unknown): JsonRecord | undefined {
@@ -211,6 +270,29 @@ for (const field of [
   };
 }
 
+const historicalProperties: Record<string, unknown> = {
+  nss: stringParameter("Identificador exacto del paciente ya admitido"),
+};
+for (const field of [
+  "fecha_nacimiento",
+  "sexo",
+  "tipo_sangre",
+  "alergias",
+  "enfermedades_cronicas",
+  "cirugias_previas",
+  "antecedentes_familiares",
+  "habitos_toxicologias",
+  "discapacidades_dispositivos",
+]) {
+  historicalProperties[field] = {
+    type: ["string", "null"],
+    description:
+      field === "fecha_nacimiento"
+        ? "Fecha en formato AAAA-MM-DD; null si no fue proporcionada"
+        : `${field}; null si no fue proporcionado`,
+  };
+}
+
 const functionTools: FunctionTool[] = [
   functionTool(
     "buscar_paciente_admision",
@@ -303,7 +385,61 @@ const functionTools: FunctionTool[] = [
       },
     },
   ),
+  functionTool(
+    "consultar_inventario_stock",
+    "Lista los medicamentos de dbo.medicamentos ordenados por existencias: criterio 'menor' devuelve los de menor stock y 'mayor' los de mayor stock. Úsala para preguntas como cuáles son los medicamentos con menor stock.",
+    {
+      criterio: { type: "string", enum: ["menor", "mayor"] },
+      limite: {
+        type: "integer",
+        description: "Cantidad de medicamentos a devolver (1 a 50)",
+      },
+    },
+  ),
+  functionTool(
+    "registrar_o_actualizar_historico",
+    "Registra o actualiza los antecedentes de un paciente existente (NSS en admisión). Los campos null conservan el valor ya registrado; no inventes datos.",
+    historicalProperties,
+  ),
 ];
+
+export async function executeStockQuery(
+  args: JsonRecord,
+  query: typeof consultarInventarioStock = consultarInventarioStock,
+): Promise<string> {
+  const { criterio, limite } = parseStockQuery(args.criterio, args.limite);
+  return JSON.stringify(await query(criterio, limite), null, 2);
+}
+
+export async function executeHistoricalRecord(
+  args: JsonRecord,
+  save: typeof registrarOActualizarHistorico = registrarOActualizarHistorico,
+): Promise<string> {
+  const input: HistoricalInput = {
+    nss: patientIdentifierArgument(args, "nss"),
+    fecha_nacimiento: stringArgument(args, "fecha_nacimiento", true),
+    sexo: stringArgument(args, "sexo", true),
+    tipo_sangre: stringArgument(args, "tipo_sangre", true),
+    alergias: stringArgument(args, "alergias", true),
+    enfermedades_cronicas: stringArgument(args, "enfermedades_cronicas", true),
+    cirugias_previas: stringArgument(args, "cirugias_previas", true),
+    antecedentes_familiares: stringArgument(args, "antecedentes_familiares", true),
+    habitos_toxicologias: stringArgument(args, "habitos_toxicologias", true),
+    discapacidades_dispositivos: stringArgument(
+      args,
+      "discapacidades_dispositivos",
+      true,
+    ),
+  };
+  try {
+    return JSON.stringify(await save(input));
+  } catch (error) {
+    if (error instanceof LookupError) {
+      return JSON.stringify({ registrado: false, mensaje: error.message });
+    }
+    throw error;
+  }
+}
 
 export async function executeMedicationCatalogSearch(
   args: JsonRecord,
@@ -410,6 +546,7 @@ export async function executePharmacyAction(
     listPendingRecipes: listarRecetasPendientes,
     markRecipeDelivered: marcarRecetaEntregada,
   },
+  uiConfirmed = false,
 ): Promise<string> {
   const action = stringArgument(args, "accion")!;
   const nss = patientIdentifierArgument(args, "nss");
@@ -426,36 +563,45 @@ export async function executePharmacyAction(
     if (recipeId === null) {
       throw new TypeError("Se requiere id_receta para confirmar la entrega.");
     }
-    const confirmation = new RegExp(
-      `\\bconfirmo que la entrega f[ií]sica de la receta\\s+${recipeId}\\s+ya fue realizada\\b`,
-      "i",
-    );
-    if (!confirmed || !confirmation.test(userMessage)) {
-      return JSON.stringify({
-        confirmacion_requerida: true,
-        mensaje:
-          `Para registrar la entrega de la receta ${recipeId}, confirma en un mensaje separado: ` +
-          `"Confirmo que la entrega física de la receta ${recipeId} ya fue realizada."`,
-      });
-    }
-    if (selectedMedicationKey) {
-      const requiredSelectionConfirmation = normalizeMedicationText(
-        `Confirmo que la clave ${selectedMedicationKey} corresponde exactamente a la prescripción médica de la receta ${recipeId}`,
-      ).replace(/\s+/g, " ");
-      const normalizedUserMessage = normalizeMedicationText(userMessage).replace(
-        /\s+/g,
-        " ",
-      );
-      if (!normalizedUserMessage.includes(requiredSelectionConfirmation)) {
+    const confirmationRequest: ConfirmationRequest = {
+      title: selectedMedicationKey
+        ? `¿Confirmas que la clave ${selectedMedicationKey} corresponde exactamente a la prescripción de la receta ${recipeId} y que la entrega física ya fue realizada?`
+        : `¿Confirmas que la entrega física de la receta ${recipeId} ya fue realizada?`,
+      confirmLabel: "Confirmar entrega",
+      cancelLabel: "Cancelar",
+      actionPayload: {
+        accion: "entregar_receta",
+        nss,
+        id_receta: recipeId,
+        clave_medicamento: selectedMedicationKey,
+      },
+    };
+    if (!uiConfirmed) {
+      const phraseConfirmed =
+        confirmed &&
+        new RegExp(
+          `\\bconfirmo que la entrega f[ií]sica de la receta\\s+${recipeId}\\s+ya fue realizada\\b`,
+          "i",
+        ).test(userMessage);
+      let selectionConfirmed = true;
+      if (selectedMedicationKey) {
+        const requiredSelectionConfirmation = normalizeMedicationText(
+          `Confirmo que la clave ${selectedMedicationKey} corresponde exactamente a la prescripción médica de la receta ${recipeId}`,
+        ).replace(/\s+/g, " ");
+        selectionConfirmed = normalizeMedicationText(userMessage)
+          .replace(/\s+/g, " ")
+          .includes(requiredSelectionConfirmation);
+      }
+      if (!phraseConfirmed || !selectionConfirmed) {
         return JSON.stringify({
-          confirmacion_clave_requerida: true,
-          clave_medicamento: selectedMedicationKey,
+          confirmacion_requerida: true,
+          ...(selectedMedicationKey
+            ? { confirmacion_clave_requerida: true, clave_medicamento: selectedMedicationKey }
+            : {}),
           mensaje:
-            `Antes de registrar la entrega, confirma que la clave ${selectedMedicationKey} ` +
-            `coincide exactamente con la prescripción médica de la receta ${recipeId}. ` +
-            `Responde: "Confirmo que la clave ${selectedMedicationKey} corresponde exactamente ` +
-            `a la prescripción médica de la receta ${recipeId}. Confirmo que la entrega física ` +
-            `de la receta ${recipeId} ya fue realizada." No se permiten sustituciones ni cambios de formulación.`,
+            "Se requiere confirmación explícita del usuario mediante los botones de confirmación. " +
+            "No se permiten sustituciones ni cambios de formulación.",
+          confirmationRequest,
         });
       }
     }
@@ -732,6 +878,12 @@ export function createAiService(config: AppConfig) {
       case "consultar_catalogo_medicamentos": {
         return executeMedicationCatalogSearch(args);
       }
+      case "consultar_inventario_stock": {
+        return executeStockQuery(args);
+      }
+      case "registrar_o_actualizar_historico": {
+        return executeHistoricalRecord(args);
+      }
       default:
         throw new Error(`Herramienta no soportada: ${functionName}`);
     }
@@ -740,7 +892,7 @@ export function createAiService(config: AppConfig) {
   async function chat(
     messages: ChatMessage[],
     entraObjectId: string,
-  ): Promise<{ response: string }> {
+  ): Promise<ChatResult> {
     if (!entraObjectId.trim()) {
       throw new PermissionError("Se requiere la identidad autenticada del empleado.");
     }
@@ -766,6 +918,7 @@ export function createAiService(config: AppConfig) {
       .filter((value): value is string => Boolean(value?.trim()))
       .join("\n\n");
     try {
+      let confirmationRequest: ConfirmationRequest | undefined;
       let response = await withContentPolicyHandling(() =>
         openAIClient.responses.create({
           model: definition.model,
@@ -788,7 +941,10 @@ export function createAiService(config: AppConfig) {
           if (!response.output_text) {
             throw new Error("El Orquestador terminó sin producir una respuesta.");
           }
-          return { response: response.output_text };
+          return {
+            response: response.output_text,
+            ...(confirmationRequest ? { confirmationRequest } : {}),
+          };
         }
         if (roundIndex === MAX_TOOL_ROUNDS) break;
 
@@ -811,6 +967,9 @@ export function createAiService(config: AppConfig) {
             const denial = authorizationDenialResponse(error);
             if (denial) return { response: denial };
             throw error;
+          }
+          if (call.name === "gestionar_farmacia") {
+            confirmationRequest = extractConfirmationRequest(output);
           }
           outputs.push({
             type: "function_call_output",
@@ -841,7 +1000,55 @@ export function createAiService(config: AppConfig) {
     }
   }
 
-  return { chat };
+  async function confirmAction(
+    payload: unknown,
+    entraObjectId: string,
+  ): Promise<ChatResult> {
+    if (!entraObjectId.trim()) {
+      throw new PermissionError("Se requiere la identidad autenticada del empleado.");
+    }
+    const employee = await consultarEmpleadoPorEntraId(entraObjectId);
+    if (!employee) {
+      throw new PermissionError(
+        "La cuenta ya no tiene un perfil activo en Vitalis.",
+      );
+    }
+    try {
+      authorizeTool(employee.rol, "gestionar_farmacia");
+    } catch (error) {
+      const denial = authorizationDenialResponse(error);
+      if (denial) return { response: denial };
+      throw error;
+    }
+    const record = asRecord(payload);
+    if (
+      !record ||
+      record.accion !== "entregar_receta" ||
+      typeof record.nss !== "string" ||
+      typeof record.id_receta !== "number" ||
+      !Number.isInteger(record.id_receta) ||
+      (record.clave_medicamento !== null &&
+        record.clave_medicamento !== undefined &&
+        typeof record.clave_medicamento !== "string")
+    ) {
+      throw new TypeError("La confirmación recibida no es válida.");
+    }
+    const output = await executePharmacyAction(
+      {
+        accion: "entregar",
+        nss: record.nss,
+        id_receta: record.id_receta,
+        clave_medicamento: record.clave_medicamento ?? null,
+        confirmar_entrega: true,
+      },
+      "",
+      undefined,
+      true,
+    );
+    return { response: formatPharmacyConfirmationResult(output) };
+  }
+
+  return { chat, confirmAction };
 }
 
 export class PermissionError extends Error {

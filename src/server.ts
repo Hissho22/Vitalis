@@ -248,6 +248,18 @@ app.post("/api/new-chat", async (req, res) => {
 app.post("/api/chat", async (req, res) => {
   enforceSameOrigin(req);
   const { identity } = await getActiveEmployee(req);
+  if (req.body?.confirmation !== undefined) {
+    const confirmed = await aiService.confirmAction(
+      req.body.confirmation,
+      identity.oid,
+    );
+    writeSession(req, res, { identity });
+    res.json({
+      response: confirmed.response,
+      html: await renderSafeMarkdown(confirmed.response),
+    });
+    return;
+  }
   const rawMessages: unknown =
     req.body?.messages ??
     (typeof req.body?.message === "string"
@@ -310,6 +322,9 @@ app.post("/api/chat", async (req, res) => {
   res.json({
     response: result.response,
     html,
+    ...(result.confirmationRequest
+      ? { confirmationRequest: result.confirmationRequest }
+      : {}),
   });
 });
 

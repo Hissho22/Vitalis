@@ -343,6 +343,140 @@ export async function buscarCatalogoMedicamentos(
   );
 }
 
+export const STOCK_QUERY_MAX_LIMIT = 50;
+
+export type StockCriterion = "menor" | "mayor";
+
+export interface StockItem {
+  clave: string;
+  insumo: string | null;
+  descripcion: string | null;
+  stock: number;
+}
+
+export function parseStockQuery(
+  criterio: unknown,
+  limite: unknown,
+): { criterio: StockCriterion; limite: number } {
+  if (criterio !== "menor" && criterio !== "mayor") {
+    throw new TypeError("El criterio debe ser 'menor' o 'mayor'.");
+  }
+  if (
+    typeof limite !== "number" ||
+    !Number.isInteger(limite) ||
+    limite < 1 ||
+    limite > STOCK_QUERY_MAX_LIMIT
+  ) {
+    throw new TypeError(
+      `El límite debe ser un entero entre 1 y ${STOCK_QUERY_MAX_LIMIT}.`,
+    );
+  }
+  return { criterio, limite };
+}
+
+export async function consultarInventarioStock(
+  criterio: StockCriterion,
+  limite: number,
+): Promise<StockItem[]> {
+  const parsed = parseStockQuery(criterio, limite);
+  const direction = parsed.criterio === "menor" ? "ASC" : "DESC";
+  return rows<StockItem>(
+    `
+      SELECT TOP (@limite)
+        [Clave] AS clave,
+        [Insumo] AS insumo,
+        [Descripción] AS descripcion,
+        [stock] AS stock
+      FROM dbo.medicamentos
+      WHERE [stock] IS NOT NULL
+      ORDER BY [stock] ${direction}, [Clave];
+    `,
+    { limite: parsed.limite },
+  );
+}
+
+export interface HistoricalInput {
+  nss: string;
+  fecha_nacimiento: string | null;
+  sexo: string | null;
+  tipo_sangre: string | null;
+  alergias: string | null;
+  enfermedades_cronicas: string | null;
+  cirugias_previas: string | null;
+  antecedentes_familiares: string | null;
+  habitos_toxicologias: string | null;
+  discapacidades_dispositivos: string | null;
+}
+
+export async function registrarOActualizarHistorico(
+  input: HistoricalInput,
+): Promise<{ nss: string; estatus: "Registrado" | "Actualizado" }> {
+  const nss = requiredText(input.nss, "NSS");
+  if (
+    input.fecha_nacimiento !== null &&
+    !/^\d{4}-\d{2}-\d{2}$/.test(input.fecha_nacimiento.trim())
+  ) {
+    throw new TypeError("La fecha de nacimiento debe tener formato AAAA-MM-DD.");
+  }
+
+  return runTransaction(async (transaction) => {
+    const patient = transaction.request();
+    patient.input("nss", stringType, nss);
+    const found = await patient.query(
+      "SELECT nss FROM dbo.admision WITH (UPDLOCK, HOLDLOCK) WHERE nss = @nss;",
+    );
+    if (found.recordset.length === 0) {
+      throw new LookupError("No existe un paciente con ese NSS en admisión.");
+    }
+
+    const history = transaction.request();
+    history.input("nss", stringType, nss);
+    history.input("fechaNacimiento", stringType, input.fecha_nacimiento?.trim() ?? null);
+    history.input("sexo", stringType, input.sexo);
+    history.input("tipoSangre", stringType, input.tipo_sangre);
+    history.input("alergias", stringType, input.alergias);
+    history.input("enfermedadesCronicas", stringType, input.enfermedades_cronicas);
+    history.input("cirugiasPrevias", stringType, input.cirugias_previas);
+    history.input("antecedentesFamiliares", stringType, input.antecedentes_familiares);
+    history.input("habitosToxicologias", stringType, input.habitos_toxicologias);
+    history.input(
+      "discapacidadesDispositivos",
+      stringType,
+      input.discapacidades_dispositivos,
+    );
+    // Los valores null conservan el dato existente al actualizar.
+    const updated = await history.query(`
+      UPDATE dbo.historicos
+      SET fecha_nacimiento = COALESCE(CONVERT(date, @fechaNacimiento), fecha_nacimiento),
+          sexo = COALESCE(@sexo, sexo),
+          tipo_sangre = COALESCE(@tipoSangre, tipo_sangre),
+          alergias = COALESCE(@alergias, alergias),
+          enfermedades_cronicas = COALESCE(@enfermedadesCronicas, enfermedades_cronicas),
+          cirugias_previas = COALESCE(@cirugiasPrevias, cirugias_previas),
+          antecedentes_familiares = COALESCE(@antecedentesFamiliares, antecedentes_familiares),
+          habitos_toxicologias = COALESCE(@habitosToxicologias, habitos_toxicologias),
+          discapacidades_dispositivos = COALESCE(@discapacidadesDispositivos, discapacidades_dispositivos)
+      WHERE nss = @nss;
+    `);
+    if ((updated.rowsAffected[0] ?? 0) > 0) {
+      return { nss, estatus: "Actualizado" as const };
+    }
+    await history.query(`
+      INSERT INTO dbo.historicos (
+        nss, fecha_nacimiento, sexo, tipo_sangre, alergias,
+        enfermedades_cronicas, cirugias_previas, antecedentes_familiares,
+        habitos_toxicologias, discapacidades_dispositivos
+      )
+      VALUES (
+        @nss, CONVERT(date, @fechaNacimiento), @sexo, @tipoSangre, @alergias,
+        @enfermedadesCronicas, @cirugiasPrevias, @antecedentesFamiliares,
+        @habitosToxicologias, @discapacidadesDispositivos
+      );
+    `);
+    return { nss, estatus: "Registrado" as const };
+  });
+}
+
 export async function buscarAdmision(
   identifier: string,
 ): Promise<PatientRecord> {
