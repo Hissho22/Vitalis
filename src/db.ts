@@ -29,6 +29,30 @@ export interface AdmissionInput {
 export interface Recipe {
   medicamento: string;
   dosis_y_tiempo: string;
+  cantidad: number;
+}
+
+export interface PharmacyDeliveryResult {
+  medicamento: string;
+  cantidad_entregada: number;
+  stock_restante: number;
+}
+
+export type PharmacyInventoryErrorCode =
+  | "quantity_missing"
+  | "medication_not_found"
+  | "medication_ambiguous"
+  | "stock_unavailable"
+  | "insufficient_stock";
+
+export class PharmacyInventoryError extends Error {
+  constructor(
+    readonly code: PharmacyInventoryErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "PharmacyInventoryError";
+  }
 }
 
 export interface MedicationCatalogItem {
@@ -516,8 +540,16 @@ export async function registrarAtencion(
     throw new TypeError("Las recetas deben enviarse como una lista.");
   }
   for (const recipe of input.recetas) {
-    if (!recipe.medicamento.trim() || !recipe.dosis_y_tiempo.trim()) {
-      throw new TypeError("Cada receta requiere medicamento y dosis/tiempo.");
+    if (
+      !recipe.medicamento.trim() ||
+      !recipe.dosis_y_tiempo.trim() ||
+      !Number.isInteger(recipe.cantidad) ||
+      recipe.cantidad <= 0 ||
+      recipe.cantidad > 2_147_483_647
+    ) {
+      throw new TypeError(
+        "Cada receta requiere medicamento, dosis/tiempo y una cantidad positiva en unidades de inventario.",
+      );
     }
   }
 
@@ -546,10 +578,12 @@ export async function registrarAtencion(
       request.input("visitId", sql.Int, visitId);
       request.input("medicamento", stringType, recipe.medicamento.trim());
       request.input("dosisTiempo", stringType, recipe.dosis_y_tiempo.trim());
+      request.input("cantidad", sql.Int, recipe.cantidad);
       const recipeResult = await request.query<{ id_receta: number }>(`
-        INSERT INTO dbo.farmacia (id_atencion, medicamento, dosis_y_tiempo)
+        INSERT INTO dbo.farmacia
+          (id_atencion, medicamento, dosis_y_tiempo, cantidad)
         OUTPUT INSERTED.id_receta
-        VALUES (@visitId, @medicamento, @dosisTiempo);
+        VALUES (@visitId, @medicamento, @dosisTiempo, @cantidad);
       `);
       const recipeId = recipeResult.recordset[0]?.id_receta;
       if (recipeId === undefined) {
@@ -568,7 +602,7 @@ export async function listarRecetasPendientes(
   return rows<PatientRecord>(
     `
       SELECT f.id_receta, f.id_atencion, f.medicamento, f.dosis_y_tiempo,
-             f.estatus_farmacia
+             f.cantidad, f.estatus_farmacia
       FROM dbo.farmacia AS f
       INNER JOIN dbo.atencion AS a ON a.id_atencion = f.id_atencion
       WHERE a.nss = @nss AND f.estatus_farmacia = 'Pendiente'
@@ -581,16 +615,129 @@ export async function listarRecetasPendientes(
 export async function marcarRecetaEntregada(
   idReceta: number,
   nss: string,
-): Promise<void> {
+): Promise<PharmacyDeliveryResult> {
   if (!Number.isInteger(idReceta) || idReceta <= 0) {
     throw new TypeError("El ID de receta debe ser positivo.");
   }
   const key = requiredText(nss, "El NSS");
-  await runTransaction(async (transaction) => {
-    const request = transaction.request();
-    request.input("idReceta", sql.Int, idReceta);
-    request.input("nss", stringType, key);
-    const result = await request.query<{ id_receta: number }>(`
+  return runTransaction(async (transaction) => {
+    const recipeRequest = transaction.request();
+    recipeRequest.input("idReceta", sql.Int, idReceta);
+    recipeRequest.input("nss", stringType, key);
+    const recipeResult = await recipeRequest.query<{
+      medicamento: string;
+      cantidad: number | null;
+    }>(`
+      SELECT f.medicamento, f.cantidad
+      FROM dbo.farmacia AS f WITH (UPDLOCK, HOLDLOCK)
+      INNER JOIN dbo.atencion AS a ON a.id_atencion = f.id_atencion
+      WHERE f.id_receta = @idReceta
+        AND a.nss = @nss
+        AND f.estatus_farmacia = 'Pendiente';
+    `);
+    const recipe = recipeResult.recordset[0];
+    if (!recipe) {
+      throw new LookupError(
+        "La receta no existe o ya no está en estado Pendiente.",
+      );
+    }
+    if (
+      typeof recipe.cantidad !== "number" ||
+      !Number.isInteger(recipe.cantidad) ||
+      recipe.cantidad <= 0
+    ) {
+      throw new PharmacyInventoryError(
+        "quantity_missing",
+        "No se registró la entrega porque la receta no tiene una cantidad válida. Solicite que se actualice antes de surtirla.",
+      );
+    }
+
+    const medicationRequest = transaction.request();
+    medicationRequest.input("medicamento", stringType, recipe.medicamento.trim());
+    const medicationResult = await medicationRequest.query<{
+      id: number;
+      clave: string;
+      insumo: string | null;
+      stock: number | null;
+    }>(`
+      SELECT TOP (2)
+        id,
+        [Clave] AS clave,
+        [Insumo] AS insumo,
+        [stock] AS stock
+      FROM dbo.medicamentos WITH (UPDLOCK, HOLDLOCK)
+      WHERE [Clave] = @medicamento
+        OR UPPER(LTRIM(RTRIM([Insumo]))) =
+           UPPER(LTRIM(RTRIM(@medicamento)))
+      ORDER BY CASE WHEN [Clave] = @medicamento THEN 0 ELSE 1 END;
+    `);
+    const inventoryRows = medicationResult.recordset;
+    const keyMatches = inventoryRows.filter(
+      (item) =>
+        item.clave.trim().toUpperCase() === recipe.medicamento.trim().toUpperCase(),
+    );
+    const nameMatches = inventoryRows.filter(
+      (item) =>
+        item.insumo?.trim().toUpperCase() ===
+        recipe.medicamento.trim().toUpperCase(),
+    );
+    const medication =
+      keyMatches.length === 1
+        ? keyMatches[0]
+        : keyMatches.length === 0 && nameMatches.length === 1
+          ? nameMatches[0]
+          : undefined;
+    if (keyMatches.length > 1 || (!keyMatches.length && nameMatches.length > 1)) {
+      throw new PharmacyInventoryError(
+        "medication_ambiguous",
+        "No se registró la entrega porque el nombre coincide con varios insumos. Verifique la clave oficial antes de surtirla.",
+      );
+    }
+    if (!medication) {
+      throw new PharmacyInventoryError(
+        "medication_not_found",
+        "No se registró la entrega porque el medicamento no coincide con un insumo del catálogo. Verifique su clave o nombre.",
+      );
+    }
+    if (
+      typeof medication.stock !== "number" ||
+      !Number.isInteger(medication.stock) ||
+      medication.stock < 0
+    ) {
+      throw new PharmacyInventoryError(
+        "stock_unavailable",
+        "No se registró la entrega porque el stock del insumo no está disponible para validación. Solicite apoyo al área de Farmacia.",
+      );
+    }
+    if (medication.stock < recipe.cantidad) {
+      throw new PharmacyInventoryError(
+        "insufficient_stock",
+        `No hay existencias suficientes: hay ${medication.stock} unidades disponibles y la receta requiere ${recipe.cantidad}. No se registró la entrega.`,
+      );
+    }
+
+    const stockRequest = transaction.request();
+    stockRequest.input("id", sql.Int, medication.id);
+    stockRequest.input("cantidad", sql.Int, recipe.cantidad);
+    const stockResult = await stockRequest.query<{ stock_restante: number }>(`
+      UPDATE dbo.medicamentos
+      SET [stock] = [stock] - @cantidad
+      OUTPUT INSERTED.[stock] AS stock_restante
+      WHERE id = @id
+        AND [stock] >= @cantidad;
+    `);
+    const stockRestante = stockResult.recordset[0]?.stock_restante;
+    if (stockRestante === undefined) {
+      throw new PharmacyInventoryError(
+        "insufficient_stock",
+        "No hay existencias suficientes para surtir la receta. No se registró la entrega.",
+      );
+    }
+
+    const updateRequest = transaction.request();
+    updateRequest.input("idReceta", sql.Int, idReceta);
+    updateRequest.input("nss", stringType, key);
+    const updateResult = await updateRequest.query<{ id_receta: number }>(`
       UPDATE f
       SET estatus_farmacia = 'Entregado'
       OUTPUT INSERTED.id_receta
@@ -600,11 +747,17 @@ export async function marcarRecetaEntregada(
         AND a.nss = @nss
         AND f.estatus_farmacia = 'Pendiente';
     `);
-    if (!result.recordset[0]) {
+    if (!updateResult.recordset[0]) {
       throw new LookupError(
         "La receta no existe o ya no está en estado Pendiente.",
       );
     }
+
+    return {
+      medicamento: medication.insumo?.trim() || medication.clave,
+      cantidad_entregada: recipe.cantidad,
+      stock_restante: stockRestante,
+    };
   });
 }
 

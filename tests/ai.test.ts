@@ -8,7 +8,7 @@ import {
   parseMedicalResult,
   runSpecialistResponse,
 } from "../src/ai.js";
-import { LookupError } from "../src/db.js";
+import { LookupError, PharmacyInventoryError } from "../src/db.js";
 import { AuthorizationError, authorizeTool } from "../src/rbac.js";
 
 test("recognizes Azure content-policy blocks without masking other errors", () => {
@@ -140,6 +140,99 @@ test("returns a controlled result when a pharmacy recipe cannot be delivered", a
   assert.match(response.mensaje, /No se registró la entrega/);
 });
 
+test("deducts the dispensed quantity from stock when a pharmacy delivery succeeds", async () => {
+  let stock = 8;
+  let delivered = false;
+  const result = await executePharmacyAction(
+    {
+      accion: "entregar",
+      nss: "DEMO-0001",
+      id_receta: 42,
+      confirmar_entrega: true,
+    },
+    "Confirmo que la entrega física de la receta 42 ya fue realizada.",
+    {
+      async listPendingRecipes() {
+        return [];
+      },
+      async markRecipeDelivered(idReceta, nss) {
+        assert.equal(idReceta, 42);
+        assert.equal(nss, "DEMO-0001");
+        const quantity = 3;
+        if (stock < quantity) {
+          throw new PharmacyInventoryError(
+            "insufficient_stock",
+            "No hay existencias suficientes.",
+          );
+        }
+        stock -= quantity;
+        delivered = true;
+        return {
+          medicamento: "Paracetamol 500 mg",
+          cantidad_entregada: quantity,
+          stock_restante: stock,
+        };
+      },
+    },
+  );
+  const response = JSON.parse(result) as {
+    estatus_farmacia: string;
+    cantidad_entregada: number;
+    stock_restante: number;
+  };
+
+  assert.equal(delivered, true);
+  assert.equal(stock, 5);
+  assert.equal(response.estatus_farmacia, "Entregado");
+  assert.equal(response.cantidad_entregada, 3);
+  assert.equal(response.stock_restante, 5);
+});
+
+test("does not register or deduct stock when inventory is insufficient", async () => {
+  let stock = 2;
+  let delivered = false;
+  const result = await executePharmacyAction(
+    {
+      accion: "entregar",
+      nss: "DEMO-0001",
+      id_receta: 42,
+      confirmar_entrega: true,
+    },
+    "Confirmo que la entrega física de la receta 42 ya fue realizada.",
+    {
+      async listPendingRecipes() {
+        return [];
+      },
+      async markRecipeDelivered() {
+        const quantityRequired = 3;
+        if (stock < quantityRequired) {
+          throw new PharmacyInventoryError(
+            "insufficient_stock",
+            "No hay existencias suficientes: hay 2 unidades disponibles y la receta requiere 3. No se registró la entrega.",
+          );
+        }
+        stock -= quantityRequired;
+        delivered = true;
+        return {
+          medicamento: "Paracetamol 500 mg",
+          cantidad_entregada: quantityRequired,
+          stock_restante: stock,
+        };
+      },
+    },
+  );
+  const response = JSON.parse(result) as {
+    entrega_registrada: boolean;
+    mensaje: string;
+  };
+
+  assert.equal(delivered, false);
+  assert.equal(stock, 2);
+  assert.equal(response.entrega_registrada, false);
+  assert.match(response.mensaje, /2 unidades disponibles/);
+  assert.match(response.mensaje, /No se registró la entrega/);
+});
+
 test("does not hide unexpected pharmacy database errors", async () => {
   const databaseError = new Error("SQL connection failed");
   await assert.rejects(
@@ -222,7 +315,11 @@ test("validates the medical response before it can be written to SQL", () => {
         notas_medicas: "Nota registrada",
         diagnostico: "Evaluación pendiente",
         recetas: [
-          { medicamento: "Medicamento", dosis_y_tiempo: "Según indicación" },
+          {
+            medicamento: "MED-123",
+            dosis_y_tiempo: "Una tableta cada 8 horas por 3 días",
+            cantidad: 9,
+          },
         ],
       }),
     ),
@@ -230,7 +327,11 @@ test("validates the medical response before it can be written to SQL", () => {
       notas_medicas: "Nota registrada",
       diagnostico: "Evaluación pendiente",
       recetas: [
-        { medicamento: "Medicamento", dosis_y_tiempo: "Según indicación" },
+        {
+          medicamento: "MED-123",
+          dosis_y_tiempo: "Una tableta cada 8 horas por 3 días",
+          cantidad: 9,
+        },
       ],
     },
   );
@@ -245,9 +346,33 @@ test("rejects malformed medical JSON, missing fields, and incomplete recipes", (
         JSON.stringify({
           notas_medicas: "Nota",
           diagnostico: "Diagnóstico",
-          recetas: [{ medicamento: "Medicamento" }],
+          recetas: [
+            {
+              medicamento: "MED-123",
+              dosis_y_tiempo: "Una tableta",
+            },
+          ],
         }),
       ),
     /receta incompleta/,
   );
+  for (const cantidad of [0, -1, 1.5, "2", null]) {
+    assert.throws(
+      () =>
+        parseMedicalResult(
+          JSON.stringify({
+            notas_medicas: "Nota",
+            diagnostico: "Diagnóstico",
+            recetas: [
+              {
+                medicamento: "MED-123",
+                dosis_y_tiempo: "Una tableta",
+                cantidad,
+              },
+            ],
+          }),
+        ),
+      /receta incompleta/,
+    );
+  }
 });

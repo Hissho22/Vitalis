@@ -19,8 +19,10 @@ import {
   LookupError,
   marcarRecetaEntregada,
   obtenerExpedienteMaster,
+  PharmacyInventoryError,
   registrarAtencion,
   type AdmissionInput,
+  type PharmacyDeliveryResult,
   type Recipe,
 } from "./db.js";
 import { AuthorizationError, authorizeTool } from "./rbac.js";
@@ -33,7 +35,7 @@ const AUTHORIZATION_DENIED_RESPONSE =
 const AUTHORIZATION_DENIAL_INSTRUCTION =
   "Si una herramienta es rechazada por autorización, informa con tono profesional y hospitalario que el rol actual no permite acceder a esa información o realizar esa acción y deriva al área correspondiente. No reveles nombres de herramientas, funciones, métodos, tablas, campos, variables, errores internos ni otros detalles de implementación.";
 const MEDICATION_CATALOG_INSTRUCTION =
-  "El catálogo es una referencia factual de insumos, descripciones, indicaciones registradas, claves y stock; no es una guía terapéutica. Admin, Médico y Farmacia deben invocar consultar_catalogo_medicamentos antes de contestar cualquier consulta sobre stock o disponibilidad, presentaciones, claves oficiales o indicaciones registradas. Responde sobre estos datos únicamente con resultados devueltos por la herramienta; no inventes ni infieras datos que no estén registrados. No afirmes que careces de acceso al catálogo o inventario ni que no puedes consultarlos. El catálogo no contiene una pauta de dosificación: no deduzcas dosis ni tratamientos personalizados de sus resultados; Médico debe seguir el protocolo clínico aprobado y validar alergias.";
+  "El catálogo es una referencia factual de insumos, descripciones, indicaciones registradas, claves y stock; no es una guía terapéutica. Admin, Médico y Farmacia deben invocar consultar_catalogo_medicamentos antes de contestar cualquier consulta sobre stock o disponibilidad, presentaciones, claves oficiales o indicaciones registradas. Responde sobre estos datos únicamente con resultados devueltos por la herramienta; no inventes ni infieras datos que no estén registrados. No afirmes que careces de acceso al catálogo o inventario ni que no puedes consultarlos. Médico debe identificar cada receta por clave oficial o nombre exacto de insumo e indicar explícitamente la cantidad total de unidades de inventario prescritas. Calcula esa cantidad solo a partir de una pauta y duración explícitamente establecidas; si falta información para determinarla, no la inventes ni emitas una cantidad. El catálogo no contiene una pauta de dosificación: no deduzcas dosis ni tratamientos personalizados de sus resultados; Médico debe seguir el protocolo clínico aprobado y validar alergias.";
 type JsonRecord = Record<string, unknown>;
 
 export function authorizationDenialResponse(error: unknown): string | undefined {
@@ -248,7 +250,7 @@ const functionTools: FunctionTool[] = [
   ),
   functionTool(
     "evaluar_consulta_medica",
-    "Delega la evaluación clínica al Agente Médico y registra su resultado. Si se requiere consultar un insumo del catálogo, proporciona termino_catalogo y opcionalmente clave_catalogo para que el backend incluya resultados verificados.",
+    "Delega la evaluación clínica al Agente Médico y registra su resultado. Cada receta debe incluir medicamento identificado por nombre exacto de insumo o clave oficial, dosis_y_tiempo y cantidad positiva de unidades del catálogo que se prescriben. Si se requiere consultar un insumo del catálogo, proporciona termino_catalogo y opcionalmente clave_catalogo para que el backend incluya resultados verificados.",
     {
       nss: stringParameter(
         "Identificador exacto del paciente; se admite texto alfanumérico como DEMO-0001",
@@ -271,7 +273,7 @@ const functionTools: FunctionTool[] = [
   ),
   functionTool(
     "gestionar_farmacia",
-    "Consulta pendientes por identificador exacto del paciente, incluso alfanumérico, o registra una entrega solo después de confirmación explícita del empleado.",
+    "Consulta pendientes por identificador exacto del paciente, incluso alfanumérico, o registra una entrega solo después de confirmación explícita del empleado, verificando el catálogo y descontando la cantidad prescrita en una transacción.",
     {
       accion: { type: "string", enum: ["pendientes", "entregar"] },
       nss: stringParameter(
@@ -359,16 +361,22 @@ export function parseMedicalResult(responseText: string): {
       Array.isArray(recipe) ||
       !("medicamento" in recipe) ||
       !("dosis_y_tiempo" in recipe) ||
+      !("cantidad" in recipe) ||
       typeof recipe.medicamento !== "string" ||
       !recipe.medicamento.trim() ||
       typeof recipe.dosis_y_tiempo !== "string" ||
-      !recipe.dosis_y_tiempo.trim()
+      !recipe.dosis_y_tiempo.trim() ||
+      typeof recipe.cantidad !== "number" ||
+      !Number.isInteger(recipe.cantidad) ||
+      recipe.cantidad <= 0 ||
+      recipe.cantidad > 2_147_483_647
     ) {
       throw new Error("La respuesta contiene una receta incompleta.");
     }
     return {
       medicamento: recipe.medicamento,
       dosis_y_tiempo: recipe.dosis_y_tiempo,
+      cantidad: recipe.cantidad,
     };
   });
 
@@ -415,19 +423,29 @@ export async function executePharmacyAction(
           `"Confirmo que la entrega física de la receta ${recipeId} ya fue realizada."`,
       });
     }
+    let delivery: PharmacyDeliveryResult;
     try {
-      await operations.markRecipeDelivered(recipeId, nss);
+      delivery = await operations.markRecipeDelivered(recipeId, nss);
     } catch (error) {
-      if (!(error instanceof LookupError)) throw error;
-      return JSON.stringify({
-        entrega_registrada: false,
-        mensaje:
-          "No se registró la entrega: la receta no existe para este paciente o ya no está pendiente.",
-      });
+      if (error instanceof LookupError) {
+        return JSON.stringify({
+          entrega_registrada: false,
+          mensaje:
+            "No se registró la entrega: la receta no existe para este paciente o ya no está pendiente.",
+        });
+      }
+      if (error instanceof PharmacyInventoryError) {
+        return JSON.stringify({
+          entrega_registrada: false,
+          mensaje: error.message,
+        });
+      }
+      throw error;
     }
     return JSON.stringify({
       id_receta: recipeId,
       estatus_farmacia: "Entregado",
+      ...delivery,
     });
   }
   throw new TypeError("La acción debe ser 'pendientes' o 'entregar'.");
@@ -629,7 +647,11 @@ export function createAiService(config: AppConfig) {
             "Revisa antecedentes y alergias del expediente y no prescribas si no " +
             "puedes validar seguridad. Responde exclusivamente un objeto JSON con " +
             "las claves notas_medicas (texto), diagnostico (texto) y recetas (lista " +
-            "de objetos con medicamento y dosis_y_tiempo; lista vacía si no aplica). " +
+            "de objetos con medicamento, dosis_y_tiempo y cantidad positiva de " +
+            "unidades de inventario; medicamento debe ser la clave oficial o el " +
+            "nombre exacto del insumo del catálogo. La cantidad debe ser explícita " +
+            "y corresponder a las unidades que se prescriben, no a una dosis aislada; " +
+            "lista vacía si no aplica). " +
             "Usa el catálogo solo como referencia factual; no deduzcas una dosis ni " +
             "tratamiento personalizado a partir de él. No incluyas markdown ni claves distintas.\n" +
             `Datos recibidos:\n${clinicalInput}`,
