@@ -31,6 +31,14 @@ export interface Recipe {
   dosis_y_tiempo: string;
 }
 
+export interface MedicationCatalogItem {
+  clave: string;
+  insumo: string | null;
+  descripcion: string | null;
+  indicaciones: string | null;
+  stock: number;
+}
+
 export interface VisitInput {
   nss: string;
   motivo_consulta: string;
@@ -248,6 +256,46 @@ export async function consultarEmpleadoPorEntraId(
     { objectId: key },
   );
   return result[0] ?? null;
+}
+
+export async function buscarCatalogoMedicamentos(
+  termino: string,
+  clave: string | null,
+): Promise<MedicationCatalogItem[]> {
+  const searchTerm = termino.trim();
+  const exactKey = clave?.trim() || null;
+  if (!searchTerm && !exactKey) {
+    throw new TypeError("Proporciona un término de búsqueda o una clave.");
+  }
+  if (searchTerm.length > 500) {
+    throw new TypeError("El término de búsqueda excede 500 caracteres.");
+  }
+  if (exactKey && exactKey.length > 255) {
+    throw new TypeError("La clave excede 255 caracteres.");
+  }
+
+  return rows<MedicationCatalogItem>(
+    `
+      SELECT TOP (5)
+        [Clave] AS clave,
+        [Insumo] AS insumo,
+        [Descripción] AS descripcion,
+        [Indicaciones] AS indicaciones,
+        [stock] AS stock
+      FROM dbo.medicamentos
+      WHERE (
+          @termino = N''
+          OR [Insumo] LIKE N'%' + @termino + N'%'
+          OR [Descripción] LIKE N'%' + @termino + N'%'
+          OR [Indicaciones] LIKE N'%' + @termino + N'%'
+        )
+        AND (@clave IS NULL OR [Clave] = @clave)
+      ORDER BY
+        CASE WHEN @clave IS NOT NULL AND [Clave] = @clave THEN 0 ELSE 1 END,
+        [Clave];
+    `,
+    { termino: searchTerm, clave: exactKey },
+  );
 }
 
 export async function buscarAdmision(
@@ -514,35 +562,43 @@ export async function registrarAtencion(
 }
 
 export async function listarRecetasPendientes(
-  idAtencion: number,
+  nss: string,
 ): Promise<PatientRecord[]> {
-  if (!Number.isInteger(idAtencion) || idAtencion <= 0) {
-    throw new TypeError("El ID de atención debe ser positivo.");
-  }
+  const key = requiredText(nss, "El NSS");
   return rows<PatientRecord>(
     `
-      SELECT id_receta, id_atencion, medicamento, dosis_y_tiempo,
-             estatus_farmacia
-      FROM dbo.farmacia
-      WHERE id_atencion = @idAtencion AND estatus_farmacia = 'Pendiente'
-      ORDER BY id_receta;
+      SELECT f.id_receta, f.id_atencion, f.medicamento, f.dosis_y_tiempo,
+             f.estatus_farmacia
+      FROM dbo.farmacia AS f
+      INNER JOIN dbo.atencion AS a ON a.id_atencion = f.id_atencion
+      WHERE a.nss = @nss AND f.estatus_farmacia = 'Pendiente'
+      ORDER BY f.id_atencion, f.id_receta;
     `,
-    { idAtencion },
+    { nss: key },
   );
 }
 
-export async function marcarRecetaEntregada(idReceta: number): Promise<void> {
+export async function marcarRecetaEntregada(
+  idReceta: number,
+  nss: string,
+): Promise<void> {
   if (!Number.isInteger(idReceta) || idReceta <= 0) {
     throw new TypeError("El ID de receta debe ser positivo.");
   }
+  const key = requiredText(nss, "El NSS");
   await runTransaction(async (transaction) => {
     const request = transaction.request();
     request.input("idReceta", sql.Int, idReceta);
+    request.input("nss", stringType, key);
     const result = await request.query<{ id_receta: number }>(`
-      UPDATE dbo.farmacia
+      UPDATE f
       SET estatus_farmacia = 'Entregado'
       OUTPUT INSERTED.id_receta
-      WHERE id_receta = @idReceta AND estatus_farmacia = 'Pendiente';
+      FROM dbo.farmacia AS f
+      INNER JOIN dbo.atencion AS a ON a.id_atencion = f.id_atencion
+      WHERE f.id_receta = @idReceta
+        AND a.nss = @nss
+        AND f.estatus_farmacia = 'Pendiente';
     `);
     if (!result.recordset[0]) {
       throw new LookupError(

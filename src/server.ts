@@ -11,6 +11,7 @@ import express, {
   type Request,
 } from "express";
 import { createAiService, PermissionError } from "./ai.js";
+import type { ChatMessage } from "./ai.js";
 import {
   AuthenticationError,
   getIdentityFromRequest,
@@ -45,7 +46,7 @@ const publicDirectory = path.resolve(currentDirectory, "../../public");
 
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
-app.use(express.json({ limit: "16kb", strict: true }));
+app.use(express.json({ limit: "384kb", strict: true }));
 app.use((_req, res, next) => {
   res.setHeader("Cache-Control", "no-store");
   next();
@@ -247,29 +248,64 @@ app.post("/api/new-chat", async (req, res) => {
 app.post("/api/chat", async (req, res) => {
   enforceSameOrigin(req);
   const { identity } = await getActiveEmployee(req);
-  const message: unknown = req.body?.message;
+  const rawMessages: unknown =
+    req.body?.messages ??
+    (typeof req.body?.message === "string"
+      ? [{ role: "user", content: req.body.message }]
+      : undefined);
+  const maxMessages = 40;
+  const maxMessageLength = 8000;
+  const maxHistoryLength = 48_000;
   if (
-    typeof message !== "string" ||
-    !message.trim() ||
-    message.length > 8000
+    !Array.isArray(rawMessages) ||
+    rawMessages.length === 0 ||
+    rawMessages.length > maxMessages
   ) {
     res.status(400).json({
-      error: "Escribe una consulta de hasta 8,000 caracteres.",
+      error: "El historial de conversación no es válido.",
     });
     return;
   }
 
-  const previousSession = readSession(req);
-  const previousThreadId =
-    previousSession?.identity?.oid === identity.oid
-      ? previousSession.threadId
-      : undefined;
-  const result = await aiService.chat(
-    message.trim(),
-    previousThreadId,
-    identity.oid,
-  );
-  writeSession(req, res, { identity, threadId: result.threadId });
+  const messages: ChatMessage[] = [];
+  let historyLength = 0;
+  for (let index = 0; index < rawMessages.length; index += 1) {
+    const item: unknown = rawMessages[index];
+    if (
+      typeof item !== "object" ||
+      item === null ||
+      Array.isArray(item) ||
+      !("role" in item) ||
+      !("content" in item) ||
+      (item.role !== "user" && item.role !== "assistant") ||
+      typeof item.content !== "string" ||
+      !item.content.trim() ||
+      item.content.length > maxMessageLength ||
+      item.role !== (index % 2 === 0 ? "user" : "assistant")
+    ) {
+      res.status(400).json({
+        error: "El historial debe alternar mensajes válidos de usuario y asistente.",
+      });
+      return;
+    }
+    historyLength += item.content.length;
+    if (historyLength > maxHistoryLength) {
+      res.status(400).json({
+        error: "El historial excede el límite permitido para esta conversación.",
+      });
+      return;
+    }
+    messages.push({ role: item.role, content: item.content.trim() });
+  }
+  if (messages.at(-1)?.role !== "user") {
+    res.status(400).json({
+      error: "El historial debe terminar con un mensaje del usuario.",
+    });
+    return;
+  }
+
+  const result = await aiService.chat(messages, identity.oid);
+  writeSession(req, res, { identity });
   const html = await renderSafeMarkdown(result.response);
   res.json({
     response: result.response,
@@ -279,10 +315,25 @@ app.post("/api/chat", async (req, res) => {
 
 app.use(express.static(publicDirectory, { index: false, maxAge: 0 }));
 
-function redactDiagnosticText(value: string, requestMessage: unknown): string {
+function redactDiagnosticText(value: string, requestMessages: unknown): string {
   let redacted = value;
-  if (typeof requestMessage === "string" && requestMessage) {
-    redacted = redacted.split(requestMessage).join("[MENSAJE DE SOLICITUD OMITIDO]");
+  const messages = typeof requestMessages === "string"
+    ? [requestMessages]
+    : Array.isArray(requestMessages)
+      ? requestMessages
+        .filter(
+          (item): item is { content: string } =>
+            typeof item === "object" &&
+            item !== null &&
+            "content" in item &&
+            typeof item.content === "string",
+        )
+        .map((item) => item.content)
+      : [];
+  for (const message of messages) {
+    if (message) {
+      redacted = redacted.split(message).join("[MENSAJE DE SOLICITUD OMITIDO]");
+    }
   }
   for (const secret of [
     process.env.SESSION_SECRET,
@@ -327,10 +378,18 @@ const errorHandler: ErrorRequestHandler = (error: unknown, req, res, next) => {
     const errorStack = error instanceof Error ? error.stack : undefined;
     console.error("La solicitud de Vitalis falló.", {
       errorName,
-      message: redactDiagnosticText(errorMessage, req.body?.message),
+      message: redactDiagnosticText(
+        errorMessage,
+        req.body?.messages ?? req.body?.message,
+      ),
       ...(errorCode === undefined ? {} : { code: errorCode }),
       ...(errorStack
-        ? { stack: redactDiagnosticText(errorStack, req.body?.message) }
+        ? {
+            stack: redactDiagnosticText(
+              errorStack,
+              req.body?.messages ?? req.body?.message,
+            ),
+          }
         : {}),
     });
   }

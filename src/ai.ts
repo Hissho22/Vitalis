@@ -10,21 +10,108 @@ import type {
 } from "openai/resources/responses/responses.js";
 import type { AppConfig } from "./config.js";
 import {
+  buscarCatalogoMedicamentos,
   buscarAdmision,
   consultarEmpleadoPorEntraId,
   consultarSeguros,
   crearAdmision,
   listarRecetasPendientes,
+  LookupError,
   marcarRecetaEntregada,
   obtenerExpedienteMaster,
   registrarAtencion,
   type AdmissionInput,
   type Recipe,
 } from "./db.js";
-import { authorizeTool } from "./rbac.js";
+import { AuthorizationError, authorizeTool } from "./rbac.js";
 
 const MAX_TOOL_ROUNDS = 8;
+const CONTENT_POLICY_RESPONSE =
+  "No puedo procesar esa solicitud por políticas de seguridad. Reformúlala sin pedir secretos, credenciales ni información no autorizada.";
+const AUTHORIZATION_DENIED_RESPONSE =
+  "Su rol actual no cuenta con autorización para acceder a esta información o realizar esta acción clínica. Por favor, remítase a las tareas correspondientes a su área asignada.";
+const AUTHORIZATION_DENIAL_INSTRUCTION =
+  "Si una herramienta es rechazada por autorización, informa con tono profesional y hospitalario que el rol actual no permite acceder a esa información o realizar esa acción y deriva al área correspondiente. No reveles nombres de herramientas, funciones, métodos, tablas, campos, variables, errores internos ni otros detalles de implementación.";
+const MEDICATION_CATALOG_INSTRUCTION =
+  "El catálogo es una referencia factual de insumos, descripciones, indicaciones registradas, claves y stock; no es una guía terapéutica. Admin, Médico y Farmacia deben invocar consultar_catalogo_medicamentos antes de contestar cualquier consulta sobre stock o disponibilidad, presentaciones, claves oficiales o indicaciones registradas. Responde sobre estos datos únicamente con resultados devueltos por la herramienta; no inventes ni infieras datos que no estén registrados. No afirmes que careces de acceso al catálogo o inventario ni que no puedes consultarlos. El catálogo no contiene una pauta de dosificación: no deduzcas dosis ni tratamientos personalizados de sus resultados; Médico debe seguir el protocolo clínico aprobado y validar alergias.";
 type JsonRecord = Record<string, unknown>;
+
+export function authorizationDenialResponse(error: unknown): string | undefined {
+  return error instanceof AuthorizationError
+    ? AUTHORIZATION_DENIED_RESPONSE
+    : undefined;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+function asRecord(value: unknown): JsonRecord | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as JsonRecord;
+}
+
+function isContentPolicyCode(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const code = value.toLowerCase().replace(/[^a-z]/g, "");
+  return new Set([
+    "contentfilter",
+    "contentpolicyviolation",
+    "responsibleaipolicyviolation",
+    "imagecontentpolicyviolation",
+    "biopolicy",
+    "misalignmentpolicyviolation",
+    "moderationblocked",
+    "safetyviolation",
+  ]).has(code);
+}
+
+export function isContentPolicyBlock(value: unknown): boolean {
+  const record = asRecord(value);
+  if (!record) return false;
+  const error = asRecord(record.error);
+  const details = asRecord(record.incomplete_details);
+  return (
+    details?.reason === "content_filter" ||
+    isContentPolicyCode(record.code) ||
+    isContentPolicyCode(record.type) ||
+    isContentPolicyCode(error?.code) ||
+    isContentPolicyCode(error?.type)
+  );
+}
+
+class ContentPolicyBlockedError extends Error {
+  constructor() {
+    super(CONTENT_POLICY_RESPONSE);
+    this.name = "ContentPolicyBlockedError";
+  }
+}
+
+async function withContentPolicyHandling<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (isContentPolicyBlock(error)) throw new ContentPolicyBlockedError();
+    throw error;
+  }
+}
+
+export async function runSpecialistResponse(
+  operation: () => Promise<unknown>,
+): Promise<string> {
+  const response = await withContentPolicyHandling(operation);
+  if (isContentPolicyBlock(response)) throw new ContentPolicyBlockedError();
+  const outputText = asRecord(response)?.output_text;
+  if (typeof outputText !== "string" || !outputText) {
+    throw new Error("El agente especialista terminó sin producir una respuesta.");
+  }
+  return outputText;
+}
 
 function stringArgument(
   args: JsonRecord,
@@ -37,6 +124,13 @@ function stringArgument(
     throw new TypeError(`El argumento ${name} debe ser texto${nullable ? " o null" : ""}.`);
   }
   return value;
+}
+
+function patientIdentifierArgument(args: JsonRecord, name: string): string {
+  return stringArgument(args, name)!
+    .trim()
+    .replace(/^(?:paciente\s+)?(?:con\s+)?NSS\s+/i, "")
+    .trim();
 }
 
 function booleanArgument(args: JsonRecord, name: string): boolean {
@@ -87,7 +181,9 @@ function functionTool(
 }
 
 const admissionProperties: Record<string, unknown> = {
-  nss: stringParameter("NSS único del paciente"),
+  nss: stringParameter(
+    "Identificador único exacto del paciente; se admite texto alfanumérico según el formato de la base de datos",
+  ),
   nombre: stringParameter("Nombre completo confirmado"),
   datos_confirmados: { type: "boolean" },
 };
@@ -114,8 +210,12 @@ for (const field of [
 const functionTools: FunctionTool[] = [
   functionTool(
     "buscar_paciente_admision",
-    "Busca en Azure SQL por NSS o nombre exacto; no crea registros.",
-    { identificador: stringParameter("NSS o nombre exacto") },
+    "Busca en Azure SQL por identificador exacto del paciente o nombre completo exacto; el identificador puede ser alfanumérico (incluidos códigos DEMO); no crea registros.",
+    {
+      identificador: stringParameter(
+        "Identificador exacto del paciente, alfanumérico permitido (por ejemplo DEMO-0001), o nombre completo exacto",
+      ),
+    },
   ),
   functionTool(
     "registrar_admision",
@@ -124,44 +224,99 @@ const functionTools: FunctionTool[] = [
   ),
   functionTool(
     "consultar_historico",
-    "Consulta datos biológicos e históricos explícitos por NSS o nombre exacto.",
-    { identificador: stringParameter("NSS o nombre exacto") },
+    "Consulta datos biológicos e históricos explícitos por identificador exacto del paciente (también alfanumérico) o nombre completo exacto.",
+    {
+      identificador: stringParameter(
+        "Identificador exacto del paciente, alfanumérico permitido (por ejemplo DEMO-0001), o nombre completo exacto",
+      ),
+    },
   ),
   functionTool(
     "obtener_expediente_master",
-    "Obtiene el expediente consolidado de dbo.master por NSS exacto.",
-    { nss: stringParameter("NSS exacto") },
+    "Obtiene el expediente consolidado de dbo.master usando el identificador exacto del paciente, incluidos identificadores alfanuméricos.",
+    { nss: stringParameter("Identificador exacto del paciente; se admite texto alfanumérico") },
   ),
   functionTool(
     "validar_poliza",
     "Consulta el estatus de póliza; no calcula deducibles ni cobertura.",
     {
-      identificador: stringParameter("NSS o nombre exacto"),
+      identificador: stringParameter(
+        "Identificador exacto del paciente, alfanumérico permitido (por ejemplo DEMO-0001), o nombre completo exacto",
+      ),
       motivo: stringParameter("Motivo de la consulta administrativa"),
     },
   ),
   functionTool(
     "evaluar_consulta_medica",
-    "Delega la evaluación clínica al Agente Médico y registra su resultado.",
+    "Delega la evaluación clínica al Agente Médico y registra su resultado. Si se requiere consultar un insumo del catálogo, proporciona termino_catalogo y opcionalmente clave_catalogo para que el backend incluya resultados verificados.",
     {
-      nss: stringParameter("NSS exacto"),
+      nss: stringParameter(
+        "Identificador exacto del paciente; se admite texto alfanumérico como DEMO-0001",
+      ),
       motivo_consulta: stringParameter("Motivo proporcionado"),
       signos_vitales: stringParameter(
         "Signos vitales reportados; no inventar mediciones",
       ),
+      termino_catalogo: {
+        type: ["string", "null"],
+        description:
+          "Término para buscar en insumo, descripción o indicaciones; null si no se requiere catálogo",
+      },
+      clave_catalogo: {
+        type: ["string", "null"],
+        description:
+          "Clave oficial exacta opcional; null si no se requiere filtrar por clave",
+      },
     },
   ),
   functionTool(
     "gestionar_farmacia",
-    "Consulta pendientes o actualiza una receta tras confirmar entrega física.",
+    "Consulta pendientes por identificador exacto del paciente, incluso alfanumérico, o registra una entrega solo después de confirmación explícita del empleado.",
     {
       accion: { type: "string", enum: ["pendientes", "entregar"] },
-      id_atencion: { type: ["integer", "null"] },
+      nss: stringParameter(
+        "Identificador exacto del paciente; se admite texto alfanumérico como DEMO-0001",
+      ),
       id_receta: { type: ["integer", "null"] },
       confirmar_entrega: { type: "boolean" },
     },
   ),
+  functionTool(
+    "consultar_catalogo_medicamentos",
+    "Busca hasta cinco registros del catálogo por insumo, descripción o indicaciones; puede acotarse por clave oficial. Devuelve únicamente datos registrados y stock, no recomienda tratamientos ni dosis.",
+    {
+      termino: stringParameter(
+        "Texto para buscar en insumo, descripción o indicaciones; puede estar vacío si se proporciona una clave",
+      ),
+      clave: {
+        type: ["string", "null"],
+        description: "Clave oficial exacta opcional; null si no se conoce",
+      },
+    },
+  ),
 ];
+
+export async function executeMedicationCatalogSearch(
+  args: JsonRecord,
+  search: typeof buscarCatalogoMedicamentos = buscarCatalogoMedicamentos,
+): Promise<string> {
+  const term = stringArgument(args, "termino")!.trim();
+  const rawKey = args.clave;
+  const key =
+    rawKey === undefined
+      ? null
+      : stringArgument(args, "clave", true)?.trim() || null;
+  if (!term && !key) {
+    throw new TypeError("Proporciona un término de búsqueda o una clave.");
+  }
+  if (term.length > 500) {
+    throw new TypeError("El término de búsqueda excede 500 caracteres.");
+  }
+  if (key && key.length > 255) {
+    throw new TypeError("La clave excede 255 caracteres.");
+  }
+  return JSON.stringify(await search(term, key), null, 2);
+}
 
 export function parseMedicalResult(responseText: string): {
   notas_medicas: string;
@@ -222,6 +377,60 @@ export function parseMedicalResult(responseText: string): {
     diagnostico: diagnosis,
     recetas: validatedRecipes,
   };
+}
+
+export interface PharmacyOperations {
+  listPendingRecipes: typeof listarRecetasPendientes;
+  markRecipeDelivered: typeof marcarRecetaEntregada;
+}
+
+export async function executePharmacyAction(
+  args: JsonRecord,
+  userMessage: string,
+  operations: PharmacyOperations = {
+    listPendingRecipes: listarRecetasPendientes,
+    markRecipeDelivered: marcarRecetaEntregada,
+  },
+): Promise<string> {
+  const action = stringArgument(args, "accion")!;
+  const nss = patientIdentifierArgument(args, "nss");
+  if (action === "pendientes") {
+    return JSON.stringify(await operations.listPendingRecipes(nss), null, 2);
+  }
+  if (action === "entregar") {
+    const recipeId = integerArgument(args, "id_receta");
+    const confirmed = booleanArgument(args, "confirmar_entrega");
+    if (recipeId === null) {
+      throw new TypeError("Se requiere id_receta para confirmar la entrega.");
+    }
+    const confirmation = new RegExp(
+      `\\bconfirmo que la entrega f[ií]sica de la receta\\s+${recipeId}\\s+ya fue realizada\\b`,
+      "i",
+    );
+    if (!confirmed || !confirmation.test(userMessage)) {
+      return JSON.stringify({
+        confirmacion_requerida: true,
+        mensaje:
+          `Para registrar la entrega de la receta ${recipeId}, confirma en un mensaje separado: ` +
+          `"Confirmo que la entrega física de la receta ${recipeId} ya fue realizada."`,
+      });
+    }
+    try {
+      await operations.markRecipeDelivered(recipeId, nss);
+    } catch (error) {
+      if (!(error instanceof LookupError)) throw error;
+      return JSON.stringify({
+        entrega_registrada: false,
+        mensaje:
+          "No se registró la entrega: la receta no existe para este paciente o ya no está pendiente.",
+      });
+    }
+    return JSON.stringify({
+      id_receta: recipeId,
+      estatus_farmacia: "Entregado",
+    });
+  }
+  throw new TypeError("La acción debe ser 'pendientes' o 'entregar'.");
 }
 
 function createAgentClient(agentName: string, project: AIProjectClient) {
@@ -288,19 +497,16 @@ export function createAiService(config: AppConfig) {
     if (!client) {
       throw new Error(`El agente especialista no está configurado: ${agentName}`);
     }
-    const response = await client.responses.create({ input: message });
-    if (!response.output_text) {
-      throw new Error(
-        `El agente especialista ${agentName} terminó sin producir una respuesta.`,
-      );
-    }
-    return response.output_text;
+    return runSpecialistResponse(() =>
+      client.responses.create({ input: message }),
+    );
   }
 
   async function executeTool(
     functionName: string,
     rawArguments: unknown,
     entraObjectId: string,
+    userMessage: string,
   ): Promise<string> {
     const employee = await consultarEmpleadoPorEntraId(entraObjectId);
     if (!employee) {
@@ -313,7 +519,7 @@ export function createAiService(config: AppConfig) {
 
     switch (functionName) {
       case "buscar_paciente_admision": {
-        const identifier = stringArgument(args, "identificador")!;
+        const identifier = patientIdentifierArgument(args, "identificador");
         let patient: JsonRecord;
         try {
           patient = await buscarAdmision(identifier);
@@ -343,7 +549,7 @@ export function createAiService(config: AppConfig) {
           );
         }
         const input: AdmissionInput = {
-          nss: stringArgument(args, "nss")!,
+          nss: patientIdentifierArgument(args, "nss"),
           nombre: stringArgument(args, "nombre")!,
           telefono: stringArgument(args, "telefono", true),
           contacto_emergencia: stringArgument(args, "contacto_emergencia", true),
@@ -365,12 +571,12 @@ export function createAiService(config: AppConfig) {
         return JSON.stringify(await crearAdmision(input));
       }
       case "obtener_expediente_master": {
-        const nss = stringArgument(args, "nss")!;
+        const nss = patientIdentifierArgument(args, "nss");
         return JSON.stringify(await obtenerExpedienteMaster(nss), null, 2);
       }
       case "consultar_historico": {
         const patient = await buscarAdmision(
-          stringArgument(args, "identificador")!,
+          patientIdentifierArgument(args, "identificador"),
         );
         const record = await obtenerExpedienteMaster(String(patient.nss));
         return runSpecialist(
@@ -382,7 +588,7 @@ export function createAiService(config: AppConfig) {
       }
       case "validar_poliza": {
         const patient = await buscarAdmision(
-          stringArgument(args, "identificador")!,
+          patientIdentifierArgument(args, "identificador"),
         );
         const policies = await consultarSeguros(String(patient.nss));
         if (policies.length === 0) {
@@ -397,15 +603,25 @@ export function createAiService(config: AppConfig) {
         );
       }
       case "evaluar_consulta_medica": {
-        const nss = stringArgument(args, "nss")!;
+        const nss = patientIdentifierArgument(args, "nss");
         const motivo = stringArgument(args, "motivo_consulta")!;
         const vitalSigns = stringArgument(args, "signos_vitales")!;
+        const catalogTerm = stringArgument(args, "termino_catalogo", true);
+        const catalogKey = stringArgument(args, "clave_catalogo", true);
         const record = await obtenerExpedienteMaster(nss);
+        const medicationCatalog =
+          catalogTerm?.trim() || catalogKey?.trim()
+            ? await buscarCatalogoMedicamentos(
+                catalogTerm ?? "",
+                catalogKey,
+              )
+            : [];
         const clinicalInput = JSON.stringify({
           nss,
           motivo_consulta: motivo,
           signos_vitales: vitalSigns,
           expediente: record,
+          catalogo_medicamentos: medicationCatalog,
         });
         const responseText = await runSpecialist(
           config.agents.medical,
@@ -414,7 +630,8 @@ export function createAiService(config: AppConfig) {
             "puedes validar seguridad. Responde exclusivamente un objeto JSON con " +
             "las claves notas_medicas (texto), diagnostico (texto) y recetas (lista " +
             "de objetos con medicamento y dosis_y_tiempo; lista vacía si no aplica). " +
-            "No incluyas markdown ni claves distintas.\n" +
+            "Usa el catálogo solo como referencia factual; no deduzcas una dosis ni " +
+            "tratamiento personalizado a partir de él. No incluyas markdown ni claves distintas.\n" +
             `Datos recibidos:\n${clinicalInput}`,
         );
         const result = parseMedicalResult(responseText);
@@ -433,32 +650,10 @@ export function createAiService(config: AppConfig) {
         );
       }
       case "gestionar_farmacia": {
-        const action = stringArgument(args, "accion")!;
-        const visitId = integerArgument(args, "id_atencion");
-        const recipeId = integerArgument(args, "id_receta");
-        const confirmed = booleanArgument(args, "confirmar_entrega");
-        if (action === "pendientes") {
-          if (visitId === null) {
-            throw new TypeError("Se requiere id_atencion para consultar pendientes.");
-          }
-          return JSON.stringify(await listarRecetasPendientes(visitId), null, 2);
-        }
-        if (action === "entregar") {
-          if (recipeId === null) {
-            throw new TypeError("Se requiere id_receta para confirmar la entrega.");
-          }
-          if (!confirmed) {
-            throw new TypeError(
-              "La entrega física debe ser confirmada por el empleado.",
-            );
-          }
-          await marcarRecetaEntregada(recipeId);
-          return JSON.stringify({
-            id_receta: recipeId,
-            estatus_farmacia: "Entregado",
-          });
-        }
-        throw new TypeError("La acción debe ser 'pendientes' o 'entregar'.");
+        return executePharmacyAction(args, userMessage);
+      }
+      case "consultar_catalogo_medicamentos": {
+        return executeMedicationCatalogSearch(args);
       }
       default:
         throw new Error(`Herramienta no soportada: ${functionName}`);
@@ -466,12 +661,15 @@ export function createAiService(config: AppConfig) {
   }
 
   async function chat(
-    message: string,
-    previousThreadId: string | undefined,
+    messages: ChatMessage[],
     entraObjectId: string,
-  ): Promise<{ response: string; threadId: string }> {
+  ): Promise<{ response: string }> {
     if (!entraObjectId.trim()) {
       throw new PermissionError("Se requiere la identidad autenticada del empleado.");
+    }
+    const userMessage = messages.at(-1)?.content;
+    if (!userMessage) {
+      throw new TypeError("El historial debe terminar con un mensaje del usuario.");
     }
     const employee = await consultarEmpleadoPorEntraId(entraObjectId);
     if (!employee) {
@@ -484,64 +682,86 @@ export function createAiService(config: AppConfig) {
     const instructions = [
       definition.instructions,
       `Contexto de acceso: rol activo del empleado = ${employee.rol}. Usa exclusivamente herramientas autorizadas para este rol.`,
+      AUTHORIZATION_DENIAL_INSTRUCTION,
+      MEDICATION_CATALOG_INSTRUCTION,
+      "No valides formatos de NSS, cédulas ni identificadores por longitud o caracteres. Siempre invoca la herramienta de búsqueda con el valor extraído (incluyendo códigos de demostración tipo DEMO-XXXX) antes de dar una respuesta.",
     ]
       .filter((value): value is string => Boolean(value?.trim()))
       .join("\n\n");
-    const threadId =
-      previousThreadId ?? (await openAIClient.conversations.create()).id;
-    let response = await openAIClient.responses.create({
-      model: definition.model,
-      instructions,
-      input: message,
-      conversation: threadId,
-      tools: functionTools,
-      tool_choice: "auto",
-    });
-
-    for (let roundIndex = 0; roundIndex <= MAX_TOOL_ROUNDS; roundIndex += 1) {
-      const functionCalls = response.output.filter(
-        (item): item is ResponseFunctionToolCall =>
-          item.type === "function_call",
+    try {
+      let response = await withContentPolicyHandling(() =>
+        openAIClient.responses.create({
+          model: definition.model,
+          instructions,
+          input: messages.map(({ role, content }) => ({ role, content })),
+          tools: functionTools,
+          tool_choice: "auto",
+        }),
       );
-      if (functionCalls.length === 0) {
-        if (!response.output_text) {
-          throw new Error("El Orquestador terminó sin producir una respuesta.");
+
+      for (let roundIndex = 0; roundIndex <= MAX_TOOL_ROUNDS; roundIndex += 1) {
+        if (isContentPolicyBlock(response)) {
+          return { response: CONTENT_POLICY_RESPONSE };
         }
-        return { response: response.output_text, threadId };
-      }
-      if (roundIndex === MAX_TOOL_ROUNDS) break;
-
-      const outputs: Array<{
-        type: "function_call_output";
-        call_id: string;
-        output: string;
-      }> = [];
-      for (const call of functionCalls) {
-        const argumentsValue: unknown = JSON.parse(call.arguments);
-        const output = await executeTool(
-          call.name,
-          argumentsValue,
-          entraObjectId,
+        const functionCalls = response.output.filter(
+          (item): item is ResponseFunctionToolCall =>
+            item.type === "function_call",
         );
-        outputs.push({
-          type: "function_call_output",
-          call_id: call.call_id,
-          output,
-        });
-      }
-      response = await openAIClient.responses.create({
-        model: definition.model,
-        instructions,
-        input: outputs,
-        conversation: threadId,
-        tools: functionTools,
-        tool_choice: "auto",
-      });
-    }
+        if (functionCalls.length === 0) {
+          if (!response.output_text) {
+            throw new Error("El Orquestador terminó sin producir una respuesta.");
+          }
+          return { response: response.output_text };
+        }
+        if (roundIndex === MAX_TOOL_ROUNDS) break;
 
-    throw new Error(
-      `El Orquestador excedió el límite de ${MAX_TOOL_ROUNDS} rondas de herramientas.`,
-    );
+        const outputs: Array<{
+          type: "function_call_output";
+          call_id: string;
+          output: string;
+        }> = [];
+        for (const call of functionCalls) {
+          const argumentsValue: unknown = JSON.parse(call.arguments);
+          let output: string;
+          try {
+            output = await executeTool(
+              call.name,
+              argumentsValue,
+              entraObjectId,
+              userMessage,
+            );
+          } catch (error) {
+            const denial = authorizationDenialResponse(error);
+            if (denial) return { response: denial };
+            throw error;
+          }
+          outputs.push({
+            type: "function_call_output",
+            call_id: call.call_id,
+            output,
+          });
+        }
+        response = await withContentPolicyHandling(() =>
+          openAIClient.responses.create({
+            model: definition.model,
+            instructions,
+            input: outputs,
+            previous_response_id: response.id,
+            tools: functionTools,
+            tool_choice: "auto",
+          }),
+        );
+      }
+
+      throw new Error(
+        `El Orquestador excedió el límite de ${MAX_TOOL_ROUNDS} rondas de herramientas.`,
+      );
+    } catch (error) {
+      if (error instanceof ContentPolicyBlockedError) {
+        return { response: CONTENT_POLICY_RESPONSE };
+      }
+      throw error;
+    }
   }
 
   return { chat };

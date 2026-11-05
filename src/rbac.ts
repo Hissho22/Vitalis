@@ -6,6 +6,7 @@ const toolRoleAccess: Readonly<Record<string, ReadonlySet<string>>> = {
   validar_poliza: new Set(["Admin", "Seguros", "Finanzas"]),
   evaluar_consulta_medica: new Set(["Admin", "Medico"]),
   gestionar_farmacia: new Set(["Admin", "Farmacia"]),
+  consultar_catalogo_medicamentos: new Set(["Admin", "Medico", "Farmacia"]),
 };
 
 export class AuthorizationError extends Error {
