@@ -66,44 +66,7 @@
           <p class="empty-subtitle">
             Selecciona una acción rápida o escribe una consulta libre:
           </p>
-          <div class="quick-actions" aria-label="Acciones rápidas">
-            <button
-              class="quick-action"
-              type="button"
-              data-prompt="Antecedentes del paciente DEMO-0001"
-            >
-              <span class="quick-action-icon" aria-hidden="true">📋</span>
-              <span class="quick-action-title">Consultar Expediente</span>
-              <span class="quick-action-description">Antecedentes del paciente</span>
-            </button>
-            <button
-              class="quick-action"
-              type="button"
-              data-prompt="Cobertura de seguro del paciente DEMO-0001"
-            >
-              <span class="quick-action-icon" aria-hidden="true">🛡️</span>
-              <span class="quick-action-title">Validar Póliza</span>
-              <span class="quick-action-description">Consultar cobertura de seguro</span>
-            </button>
-            <button
-              class="quick-action"
-              type="button"
-              data-prompt="Nota médica con signos vitales del paciente DEMO-0001"
-            >
-              <span class="quick-action-icon" aria-hidden="true">🩺</span>
-              <span class="quick-action-title">Nota de Evolución</span>
-              <span class="quick-action-description">Registrar atención médica</span>
-            </button>
-            <button
-              class="quick-action"
-              type="button"
-              data-prompt="Recetas pendientes para surtir del paciente DEMO-0001"
-            >
-              <span class="quick-action-icon" aria-hidden="true">💊</span>
-              <span class="quick-action-title">Farmacia y Recetas</span>
-              <span class="quick-action-description">Revisar recetas pendientes</span>
-            </button>
-          </div>
+          <div id="quick-actions" class="quick-actions" aria-label="Acciones rápidas"></div>
         </div>
         <div id="messages" class="messages" aria-live="polite" hidden></div>
         <form id="chat-form" class="composer">
@@ -127,7 +90,7 @@
           </button>
         </form>
         <p class="composer-note">
-          Verifica la información antes de realizar acciones en el expediente.
+          Verifica la información antes de realizar acciones.
         </p>
       </section>
       <footer class="footer">Vitalis <span>·</span> Sistema Hospitalario</footer>

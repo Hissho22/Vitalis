@@ -188,6 +188,7 @@ async function loadIdentity() {
     userRole.textContent = role || "Personal";
     userAvatar.textContent = initialsFor(name) || "U";
     welcomeName.textContent = name || "Usuario";
+    renderQuickActions(role);
     updateConversationView();
     messageInput.focus();
   } catch (error) {
@@ -198,13 +199,110 @@ async function loadIdentity() {
   }
 }
 
-document.querySelectorAll(".quick-action").forEach((button) => {
-  button.addEventListener("click", () => {
-    messageInput.value = button.dataset.prompt || "";
-    messageInput.dispatchEvent(new Event("input", { bubbles: true }));
-    messageInput.focus();
-  });
-});
+const NSS_PLACEHOLDER = "[ingrese NSS]";
+
+const QUICK_ACTIONS = {
+  expediente: {
+    icon: "📋",
+    title: "Consultar Expediente",
+    description: "Antecedentes del paciente",
+    prompt: `Consultar el expediente del paciente con NSS: ${NSS_PLACEHOLDER}`,
+  },
+  poliza: {
+    icon: "🛡️",
+    title: "Validar Póliza / Cobertura",
+    description: "Consultar cobertura de seguro",
+    prompt: `Validar la póliza y cobertura del paciente con NSS: ${NSS_PLACEHOLDER}`,
+  },
+  atencion: {
+    icon: "🩺",
+    title: "Nota de Evolución / Atención médica",
+    description: "Registrar atención médica",
+    prompt: `Registrar nota de evolución del paciente con NSS: ${NSS_PLACEHOLDER}. Motivo y signos vitales: [ingrese datos]`,
+  },
+  farmacia: {
+    icon: "💊",
+    title: "Farmacia y Recetas",
+    description: "Revisar recetas pendientes",
+    prompt: `¿Qué recetas están pendientes de entrega en farmacia para el paciente con NSS: ${NSS_PLACEHOLDER}?`,
+  },
+  inventario: {
+    icon: "📦",
+    title: "Consultar Inventario",
+    description: "Medicamentos con menor stock",
+    prompt: "¿Cuáles son los medicamentos con menor stock?",
+  },
+  historicos: {
+    icon: "🗂️",
+    title: "Registrar / Consultar Antecedentes Clínicos",
+    description: "Antecedentes del paciente",
+    prompt: `Consultar o registrar antecedentes clínicos del paciente con NSS: ${NSS_PLACEHOLDER}`,
+  },
+  registrarPaciente: {
+    icon: "➕",
+    title: "Registrar Paciente",
+    description: "Alta de un paciente nuevo",
+    prompt: "Registrar un paciente nuevo. Datos: [ingrese nombre, NSS y contacto]",
+  },
+  consultarPaciente: {
+    icon: "🔎",
+    title: "Consultar Paciente",
+    description: "Buscar por NSS o nombre",
+    prompt: `Consultar al paciente con NSS: ${NSS_PLACEHOLDER}`,
+  },
+};
+
+const QUICK_ACTIONS_BY_ROLE = {
+  Admin: [
+    "expediente",
+    "poliza",
+    "atencion",
+    "farmacia",
+    "inventario",
+    "historicos",
+    "registrarPaciente",
+    "consultarPaciente",
+  ],
+  Farmacia: ["farmacia", "inventario"],
+  Medico: ["expediente", "atencion"],
+  Admision: ["registrarPaciente", "consultarPaciente"],
+  Seguros: ["poliza"],
+  Historicos: ["historicos"],
+};
+
+function renderQuickActions(role) {
+  const container = document.querySelector("#quick-actions");
+  container.replaceChildren();
+  const keys = QUICK_ACTIONS_BY_ROLE[role] ?? [];
+  container.hidden = keys.length === 0;
+  for (const key of keys) {
+    const action = QUICK_ACTIONS[key];
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quick-action";
+    const icon = document.createElement("span");
+    icon.className = "quick-action-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = action.icon;
+    const title = document.createElement("span");
+    title.className = "quick-action-title";
+    title.textContent = action.title;
+    const description = document.createElement("span");
+    description.className = "quick-action-description";
+    description.textContent = action.description;
+    button.append(icon, title, description);
+    button.addEventListener("click", () => {
+      messageInput.value = action.prompt;
+      messageInput.dispatchEvent(new Event("input", { bubbles: true }));
+      messageInput.focus();
+      const start = action.prompt.indexOf("[");
+      if (start > -1) {
+        messageInput.setSelectionRange(start, action.prompt.indexOf("]", start) + 1);
+      }
+    });
+    container.append(button);
+  }
+}
 
 chatForm.addEventListener("submit", async (event) => {
   event.preventDefault();
