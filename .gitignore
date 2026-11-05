@@ -17,3 +17,6 @@ polizas_seguros.json
 
 # Logs
 *.log
+
+# Archivo fuente del logotipo (el asset publicado es public/img/logo.png)
+Logo.jfif
