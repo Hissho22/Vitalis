@@ -63,7 +63,7 @@ function initialsFor(name) {
     .join("");
 }
 
-function addMessage(role, content, renderedHtml, confirmationRequest) {
+function addMessage(role, content, renderedHtml, confirmationRequest, editable = false) {
   const article = document.createElement("article");
   article.className = `message message-${role}`;
   const label = document.createElement("span");
@@ -77,12 +77,74 @@ function addMessage(role, content, renderedHtml, confirmationRequest) {
     body.textContent = content;
   }
   article.append(label, body);
+  if (role === "user" && editable) {
+    article.append(buildEditButton(article, body, content));
+  }
   if (role === "assistant" && confirmationRequest) {
     article.append(buildConfirmation(confirmationRequest));
   }
   messages.append(article);
   updateConversationView();
   article.scrollIntoView({ behavior: "smooth", block: "end" });
+}
+
+function buildEditButton(article, body, original) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "edit-message";
+  button.setAttribute("aria-label", "Editar mensaje");
+  button.title = "Editar";
+  button.textContent = "✎";
+  button.addEventListener("click", () => {
+    if (sendButton.disabled) return;
+    startEdit(article, body, button, original);
+  });
+  return button;
+}
+
+function startEdit(article, body, editButton, original) {
+  const index = Array.prototype.indexOf.call(messages.children, article);
+  if (index < 0 || index % 2 !== 0 || conversationHistory[index]?.role !== "user") return;
+
+  const editor = document.createElement("textarea");
+  editor.className = "edit-textarea";
+  editor.maxLength = MAX_HISTORY_MESSAGE_LENGTH;
+  editor.rows = 3;
+  editor.value = original;
+  editor.setAttribute("aria-label", "Editar mensaje");
+  const actions = document.createElement("div");
+  actions.className = "confirmation-actions";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "button button-primary";
+  save.textContent = "Guardar";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "button button-secondary";
+  cancel.textContent = "Cancelar";
+  actions.append(save, cancel);
+
+  body.hidden = true;
+  editButton.hidden = true;
+  article.append(editor, actions);
+  editor.focus();
+
+  const close = () => {
+    editor.remove();
+    actions.remove();
+    body.hidden = false;
+    editButton.hidden = false;
+  };
+  cancel.addEventListener("click", close);
+  save.addEventListener("click", async () => {
+    const text = editor.value.trim();
+    if (!text || sendButton.disabled) return;
+    // Descarta este mensaje y todo lo que le siguió antes de reenviarlo corregido.
+    conversationHistory = conversationHistory.slice(0, index);
+    while (messages.children.length > index) messages.lastElementChild.remove();
+    updateConversationView();
+    await sendMessage(text);
+  });
 }
 
 function buildConfirmation(confirmationRequest) {
@@ -308,11 +370,15 @@ chatForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const message = messageInput.value.trim();
   if (!message || sendButton.disabled) return;
+  messageInput.value = "";
+  messageInput.style.height = "auto";
+  await sendMessage(message);
+});
 
+async function sendMessage(message) {
   prepareHistoryForUserMessage(message);
   addHistoryMessage("user", message);
-  addMessage("user", message);
-  messageInput.value = "";
+  addMessage("user", message, undefined, undefined, true);
   setBusy(true);
   try {
     const result = await request("/api/chat", {
@@ -331,7 +397,7 @@ chatForm.addEventListener("submit", async (event) => {
   } finally {
     setBusy(false);
   }
-});
+}
 
 messageInput.addEventListener("input", () => {
   messageInput.style.height = "auto";
@@ -358,6 +424,20 @@ newChatButton.addEventListener("click", async () => {
   } finally {
     newChatButton.disabled = false;
   }
+});
+
+// Si el logotipo no está disponible, se conserva la marca textual.
+document.querySelectorAll(".brand-logo, .login-logo").forEach((image) => {
+  const useFallback = () => {
+    const fallback = document.createElement("span");
+    fallback.className = "brand-mark";
+    fallback.textContent = "V";
+    fallback.setAttribute("role", "img");
+    fallback.setAttribute("aria-label", "Vitalis");
+    image.replaceWith(fallback);
+  };
+  image.addEventListener("error", useFallback);
+  if (image.complete && image.naturalWidth === 0) useFallback();
 });
 
 loadIdentity();
