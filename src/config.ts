@@ -13,6 +13,19 @@ export interface AppConfig {
   };
   sessionSecret: string;
   port: number;
+  adminDomain: string;
+}
+
+export const DEFAULT_ADMIN_DOMAIN = "labmx.ai";
+
+export function resolveAdminDomain(env: NodeJS.ProcessEnv): string {
+  const domain = (env.ALLOWED_ADMIN_DOMAIN?.trim() || DEFAULT_ADMIN_DOMAIN)
+    .replace(/^@/, "")
+    .toLowerCase();
+  if (!/^[a-z\d-]+(\.[a-z\d-]+)+$/.test(domain)) {
+    throw new Error("ALLOWED_ADMIN_DOMAIN no es un dominio válido.");
+  }
+  return domain;
 }
 
 function requiredSetting(env: NodeJS.ProcessEnv, ...names: string[]): string {
@@ -77,6 +90,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     },
     sessionSecret,
     port,
+    adminDomain: resolveAdminDomain(env),
   };
 }
 

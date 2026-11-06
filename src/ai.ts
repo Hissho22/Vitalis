@@ -9,10 +9,11 @@ import type {
   ResponseFunctionToolCall,
 } from "openai/resources/responses/responses.js";
 import type { AppConfig } from "./config.js";
+import type { EntraIdentity } from "./auth.js";
+import { resolveEmployee } from "./employee.js";
 import {
   buscarCatalogoMedicamentos,
   buscarAdmision,
-  consultarEmpleadoPorEntraId,
   consultarInventarioStock,
   consultarSeguros,
   crearAdmision,
@@ -35,6 +36,54 @@ import {
 import { AuthorizationError, authorizeTool } from "./rbac.js";
 
 const MAX_TOOL_ROUNDS = 8;
+// Límite por llamada a Foundry y límite total por mensaje (App Service corta a ~230 s).
+const FOUNDRY_REQUEST_OPTIONS = { timeout: 60_000, maxRetries: 1 } as const;
+const CHAT_DEADLINE_MS = 180_000;
+const AI_UNAVAILABLE_RESPONSE =
+  "El asistente tardó demasiado en responder o hay una intermitencia temporal. Por favor, intenta de nuevo en unos momentos.";
+
+export type AuthenticatedIdentity = Pick<EntraIdentity, "oid" | "name" | "email">;
+
+export class AiUnavailableError extends Error {
+  constructor(options?: ErrorOptions) {
+    super(AI_UNAVAILABLE_RESPONSE, options);
+    this.name = "AiUnavailableError";
+  }
+}
+
+export function isTransientAiError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const record = error as Record<string, unknown>;
+  const name = typeof record.name === "string" ? record.name : "";
+  if (
+    ["APIConnectionTimeoutError", "APIConnectionError", "TimeoutError", "AbortError"].includes(
+      name,
+    )
+  ) {
+    return true;
+  }
+  if (
+    typeof record.code === "string" &&
+    ["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].includes(
+      record.code,
+    )
+  ) {
+    return true;
+  }
+  const status = record.status;
+  return (
+    typeof status === "number" &&
+    (status === 408 || status === 409 || status === 429 || status >= 500)
+  );
+}
+
+export function withDeadline<T>(operation: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new AiUnavailableError()), ms);
+  });
+  return Promise.race([operation, deadline]).finally(() => clearTimeout(timer));
+}
 const CONTENT_POLICY_RESPONSE =
   "No puedo procesar esa solicitud por políticas de seguridad. Reformúlala sin pedir secretos, credenciales ni información no autorizada.";
 const AUTHORIZATION_DENIED_RESPONSE =
@@ -185,6 +234,7 @@ async function withContentPolicyHandling<T>(
     return await operation();
   } catch (error) {
     if (isContentPolicyBlock(error)) throw new ContentPolicyBlockedError();
+    if (isTransientAiError(error)) throw new AiUnavailableError({ cause: error });
     throw error;
   }
 }
@@ -638,6 +688,18 @@ export async function executePharmacyAction(
     if (recipeId === null) {
       throw new TypeError("Se requiere id_receta para confirmar la entrega.");
     }
+    if (uiConfirmed) {
+      // Un doble clic o un reenvío no debe repetir la entrega ni el descuento de stock.
+      const current = await operations.findRecipeById?.(recipeId);
+      if (current?.estatus_farmacia === "Entregado") {
+        return JSON.stringify({
+          entrega_registrada: false,
+          ya_procesada: true,
+          id_receta: recipeId,
+          mensaje: `La receta ${recipeId} ya fue entregada previamente. No se descontó inventario nuevamente.`,
+        });
+      }
+    }
     const confirmationRequest: ConfirmationRequest = {
       title: selectedMedicationKey
         ? `¿Confirmas que la clave ${selectedMedicationKey} corresponde exactamente a la prescripción de la receta ${recipeId} y que la entrega física ya fue realizada?`
@@ -689,6 +751,15 @@ export async function executePharmacyAction(
       );
     } catch (error) {
       if (error instanceof LookupError) {
+        const current = await operations.findRecipeById?.(recipeId);
+        if (current?.estatus_farmacia === "Entregado") {
+          return JSON.stringify({
+            entrega_registrada: false,
+            ya_procesada: true,
+            id_receta: recipeId,
+            mensaje: `La receta ${recipeId} ya fue entregada previamente. No se descontó inventario nuevamente.`,
+          });
+        }
         return JSON.stringify({
           entrega_registrada: false,
           mensaje:
@@ -793,17 +864,17 @@ export function createAiService(config: AppConfig) {
       throw new Error(`El agente especialista no está configurado: ${agentName}`);
     }
     return runSpecialistResponse(() =>
-      client.responses.create({ input: message }),
+      client.responses.create({ input: message }, FOUNDRY_REQUEST_OPTIONS),
     );
   }
 
   async function executeTool(
     functionName: string,
     rawArguments: unknown,
-    entraObjectId: string,
+    identity: AuthenticatedIdentity,
     userMessage: string,
   ): Promise<string> {
-    const employee = await consultarEmpleadoPorEntraId(entraObjectId);
+    const employee = await resolveEmployee(identity);
     if (!employee) {
       throw new PermissionError(
         "La cuenta ya no tiene un perfil activo en Vitalis.",
@@ -968,16 +1039,30 @@ export function createAiService(config: AppConfig) {
 
   async function chat(
     messages: ChatMessage[],
-    entraObjectId: string,
+    identity: AuthenticatedIdentity,
   ): Promise<ChatResult> {
-    if (!entraObjectId.trim()) {
+    try {
+      return await withDeadline(runChat(messages, identity), CHAT_DEADLINE_MS);
+    } catch (error) {
+      if (error instanceof AiUnavailableError) {
+        return { response: AI_UNAVAILABLE_RESPONSE };
+      }
+      throw error;
+    }
+  }
+
+  async function runChat(
+    messages: ChatMessage[],
+    identity: AuthenticatedIdentity,
+  ): Promise<ChatResult> {
+    if (!identity.oid.trim()) {
       throw new PermissionError("Se requiere la identidad autenticada del empleado.");
     }
     const userMessage = messages.at(-1)?.content;
     if (!userMessage) {
       throw new TypeError("El historial debe terminar con un mensaje del usuario.");
     }
-    const employee = await consultarEmpleadoPorEntraId(entraObjectId);
+    const employee = await resolveEmployee(identity);
     if (!employee) {
       throw new PermissionError(
         "La cuenta ya no tiene un perfil activo en Vitalis.",
@@ -998,7 +1083,7 @@ export function createAiService(config: AppConfig) {
           input: messages.map(({ role, content }) => ({ role, content })),
           tools: functionTools,
           tool_choice: "auto",
-        }),
+        }, FOUNDRY_REQUEST_OPTIONS),
       );
 
       for (let roundIndex = 0; roundIndex <= MAX_TOOL_ROUNDS; roundIndex += 1) {
@@ -1032,7 +1117,7 @@ export function createAiService(config: AppConfig) {
             output = await executeTool(
               call.name,
               argumentsValue,
-              entraObjectId,
+              identity,
               userMessage,
             );
           } catch (error) {
@@ -1057,7 +1142,7 @@ export function createAiService(config: AppConfig) {
             previous_response_id: response.id,
             tools: functionTools,
             tool_choice: "auto",
-          }),
+          }, FOUNDRY_REQUEST_OPTIONS),
         );
       }
 
@@ -1074,12 +1159,12 @@ export function createAiService(config: AppConfig) {
 
   async function confirmAction(
     payload: unknown,
-    entraObjectId: string,
+    identity: AuthenticatedIdentity,
   ): Promise<ChatResult> {
-    if (!entraObjectId.trim()) {
+    if (!identity.oid.trim()) {
       throw new PermissionError("Se requiere la identidad autenticada del empleado.");
     }
-    const employee = await consultarEmpleadoPorEntraId(entraObjectId);
+    const employee = await resolveEmployee(identity);
     if (!employee) {
       throw new PermissionError(
         "La cuenta ya no tiene un perfil activo en Vitalis.",

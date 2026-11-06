@@ -5,6 +5,7 @@ export interface EntraIdentity {
   oid: string;
   tid: string;
   name: string;
+  email?: string;
 }
 
 export class AuthenticationError extends Error {
@@ -20,6 +21,8 @@ export class AuthenticationError extends Error {
 const objectIdClaim =
   "http://schemas.microsoft.com/identity/claims/objectidentifier";
 const tenantIdClaim = "http://schemas.microsoft.com/identity/claims/tenantid";
+const emailClaim =
+  "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress";
 const uuidPattern = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
 
 export function decodeAppServicePrincipal(
@@ -75,12 +78,26 @@ export function decodeAppServicePrincipal(
   const tid =
     claims.get("tid") ?? claims.get(tenantIdClaim) ?? "";
   const name = claims.get("name") ?? displayName;
+  const email = (
+    claims.get("preferred_username") ??
+    claims.get("email") ??
+    claims.get("upn") ??
+    claims.get(emailClaim) ??
+    displayName
+  )
+    .trim()
+    .toLowerCase();
 
   if (!uuidPattern.test(oid) || !uuidPattern.test(tid)) {
     throw new AuthenticationError("El principal no contiene Object ID y Tenant ID válidos.");
   }
 
-  return { oid: oid.toLowerCase(), tid: tid.toLowerCase(), name };
+  return {
+    oid: oid.toLowerCase(),
+    tid: tid.toLowerCase(),
+    name,
+    ...(email.includes("@") ? { email } : {}),
+  };
 }
 
 export function getIdentityFromRequest(req: Request): EntraIdentity {

@@ -197,6 +197,9 @@ function parseConnectionString(connectionString: string): sql.config {
     user,
     password,
     connectionTimeout: Math.ceil(timeoutSeconds * 1000),
+    requestTimeout: 30_000,
+    // Las conexiones inactivas se liberan antes de que Azure SQL cierre el socket.
+    pool: { max: 10, min: 0, idleTimeoutMillis: 30_000 },
     options: {
       encrypt: booleanSetting("encrypt", true),
       trustServerCertificate: booleanSetting("trustservercertificate", false),
@@ -215,6 +218,11 @@ async function getPool(): Promise<sql.ConnectionPool> {
     throw new Error("Falta configurar AZURE_SQL_CONNECTION_STRING.");
   }
   const pool = new sql.ConnectionPool(parseConnectionString(connectionString));
+  // Un error del pool (socket perdido) invalida el pool para reconectar en la siguiente solicitud.
+  pool.on("error", () => {
+    if (poolPromise === tracked) poolPromise = undefined;
+    pool.close().catch(() => undefined);
+  });
   const pending = pool.connect();
   const tracked = pending.catch((error: unknown) => {
     if (poolPromise === tracked) poolPromise = undefined;
@@ -222,6 +230,32 @@ async function getPool(): Promise<sql.ConnectionPool> {
   });
   poolPromise = tracked;
   return tracked;
+}
+
+const CONNECTION_ERROR_CODES = new Set([
+  "ECONNCLOSED",
+  "ESOCKET",
+  "ENOTOPEN",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "ELOGIN",
+]);
+
+export function isConnectionError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const code = "code" in error ? error.code : undefined;
+  return typeof code === "string" && CONNECTION_ERROR_CODES.has(code);
+}
+
+async function resetPool(): Promise<void> {
+  const pending = poolPromise;
+  poolPromise = undefined;
+  if (!pending) return;
+  try {
+    await (await pending).close();
+  } catch {
+    // El pool ya estaba roto; se descarta sin propagar el error.
+  }
 }
 
 export async function closeDatabase(): Promise<void> {
@@ -237,12 +271,25 @@ async function rows<T extends object>(
   query: string,
   parameters: Record<string, string | number | null>,
 ): Promise<T[]> {
-  const request = (await getPool()).request();
-  for (const [name, value] of Object.entries(parameters)) {
-    if (typeof value === "number") request.input(name, sql.Int, value);
-    else request.input(name, stringType, value);
+  const execute = async () => {
+    const request = (await getPool()).request();
+    for (const [name, value] of Object.entries(parameters)) {
+      if (typeof value === "number") request.input(name, sql.Int, value);
+      else request.input(name, stringType, value);
+    }
+    return request.query<T>(query);
+  };
+  let result: sql.IResult<T>;
+  try {
+    result = await execute();
+  } catch (error) {
+    // Solo las lecturas se reintentan: repetir una escritura podría duplicarla.
+    if (!isConnectionError(error) || !/^\s*(SELECT|WITH)\b/i.test(query)) {
+      throw error;
+    }
+    await resetPool();
+    result = await execute();
   }
-  const result = await request.query<T>(query);
   return result.recordset.map((row) => {
     const normalized: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(row)) {
@@ -260,8 +307,16 @@ async function rows<T extends object>(
 async function runTransaction<T>(
   operation: (transaction: sql.Transaction) => Promise<T>,
 ): Promise<T> {
-  const transaction = new sql.Transaction(await getPool());
-  await transaction.begin();
+  let transaction = new sql.Transaction(await getPool());
+  try {
+    await transaction.begin();
+  } catch (error) {
+    // Aún no se ejecutó nada: es seguro reconectar y reiniciar.
+    if (!isConnectionError(error)) throw error;
+    await resetPool();
+    transaction = new sql.Transaction(await getPool());
+    await transaction.begin();
+  }
   try {
     const result = await operation(transaction);
     await transaction.commit();
@@ -286,6 +341,7 @@ function requiredText(value: string, field: string): string {
 
 export async function consultarEmpleadoPorEntraId(
   objectId: string,
+  includeInactive = false,
 ): Promise<Employee | null> {
   const key = requiredText(objectId, "El Object ID de Entra ID");
   const result = await rows<Employee>(
@@ -293,9 +349,9 @@ export async function consultarEmpleadoPorEntraId(
       SELECT id_empleado, entra_object_id, nombre, correo, rol, estatus
       FROM dbo.empleados
       WHERE entra_object_id = CONVERT(uniqueidentifier, @objectId)
-        AND LOWER(LTRIM(RTRIM(estatus))) = 'activo';
+        AND (@incluirInactivos = 1 OR LOWER(LTRIM(RTRIM(estatus))) = 'activo');
     `,
-    { objectId: key },
+    { objectId: key, incluirInactivos: includeInactive ? 1 : 0 },
   );
   return result[0] ?? null;
 }

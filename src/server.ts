@@ -20,9 +20,9 @@ import {
 import { loadConfig } from "./config.js";
 import {
   closeDatabase,
-  consultarEmpleadoPorEntraId,
   type Employee,
 } from "./db.js";
+import { resolveEmployee, UNAUTHORIZED_ACCOUNT_MESSAGE } from "./employee.js";
 import { AuthorizationError } from "./rbac.js";
 import { renderSafeMarkdown } from "./markdown.js";
 import { clearSession, readSession, writeSession } from "./session.js";
@@ -92,6 +92,17 @@ function stringClaim(claims: object | undefined, name: string): string {
   return typeof value === "string" ? value : "";
 }
 
+function emailFromClaims(claims: object | undefined): string {
+  const email = (
+    stringClaim(claims, "preferred_username") ||
+    stringClaim(claims, "email") ||
+    stringClaim(claims, "upn")
+  )
+    .trim()
+    .toLowerCase();
+  return email.includes("@") ? email : "";
+}
+
 async function getActiveEmployee(req: Request): Promise<{
   identity: EntraIdentity;
   employee: Employee;
@@ -102,11 +113,13 @@ async function getActiveEmployee(req: Request): Promise<{
       "Esta aplicación solo admite cuentas de la organización configurada.",
     );
   }
-  const employee = await consultarEmpleadoPorEntraId(identity.oid);
+  const employee = await resolveEmployee(
+    identity,
+    undefined,
+    config.adminDomain,
+  );
   if (!employee) {
-    throw new AuthorizationError(
-      "Tu cuenta no tiene un perfil activo en Vitalis.",
-    );
+    throw new AuthorizationError(UNAUTHORIZED_ACCOUNT_MESSAGE);
   }
   if (!employee.rol.trim()) {
     throw new AuthorizationError("Tu perfil no tiene un rol asignado.");
@@ -203,6 +216,7 @@ app.get("/auth/callback", async (req, res) => {
     name:
       stringClaim(claims, "name") ||
       stringClaim(claims, "preferred_username"),
+    ...(emailFromClaims(claims) ? { email: emailFromClaims(claims) } : {}),
   };
   const uuidPattern =
     /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
@@ -217,11 +231,13 @@ app.get("/auth/callback", async (req, res) => {
     );
   }
 
-  const employee = await consultarEmpleadoPorEntraId(identity.oid);
+  const employee = await resolveEmployee(
+    identity,
+    undefined,
+    config.adminDomain,
+  );
   if (!employee) {
-    throw new AuthorizationError(
-      "Tu cuenta pertenece a la organización, pero no tiene un perfil activo en Vitalis.",
-    );
+    throw new AuthorizationError(UNAUTHORIZED_ACCOUNT_MESSAGE);
   }
   writeSession(req, res, { identity });
   res.redirect("/");
@@ -233,9 +249,27 @@ app.post("/auth/logout", (req, res) => {
 });
 
 app.get("/api/me", async (req, res) => {
-  const { identity, employee } = await getActiveEmployee(req);
-  writeSession(req, res, { identity });
-  res.json({ name: employee.nombre, role: employee.rol.trim() });
+  try {
+    const { identity, employee } = await getActiveEmployee(req);
+    writeSession(req, res, { identity });
+    res.json({
+      name: employee.nombre,
+      role: employee.rol.trim(),
+      rol: employee.rol.trim(),
+      autorizado: true,
+    });
+  } catch (error) {
+    if (error instanceof AuthorizationError) {
+      res.status(403).json({
+        rol: null,
+        autorizado: false,
+        mensaje: error.message,
+        error: error.message,
+      });
+      return;
+    }
+    throw error;
+  }
 });
 
 app.post("/api/new-chat", async (req, res) => {
@@ -251,7 +285,7 @@ app.post("/api/chat", async (req, res) => {
   if (req.body?.confirmation !== undefined) {
     const confirmed = await aiService.confirmAction(
       req.body.confirmation,
-      identity.oid,
+      identity,
     );
     writeSession(req, res, { identity });
     res.json({
@@ -316,7 +350,7 @@ app.post("/api/chat", async (req, res) => {
     return;
   }
 
-  const result = await aiService.chat(messages, identity.oid);
+  const result = await aiService.chat(messages, identity);
   writeSession(req, res, { identity });
   const html = await renderSafeMarkdown(result.response);
   res.json({

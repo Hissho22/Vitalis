@@ -216,17 +216,47 @@ function showError(message) {
   addMessage("assistant", message);
 }
 
+const REQUEST_TIMEOUT_MS = 200000;
+const NETWORK_ERROR_MESSAGE =
+  "No se pudo completar la solicitud. Revisa tu conexión e intenta de nuevo en unos momentos.";
+
 async function request(path, options = {}) {
-  const response = await fetch(path, {
-    credentials: "same-origin",
-    ...options,
-    headers: {
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      ...options.headers,
-    },
-  });
+  // El temporizador evita que la interfaz quede cargando indefinidamente.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch(path, {
+      credentials: "same-origin",
+      signal: controller.signal,
+      ...options,
+      headers: {
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...options.headers,
+      },
+    });
+  } catch (error) {
+    const failure = new Error(
+      error.name === "AbortError"
+        ? "El asistente tardó demasiado en responder. Por favor, intenta de nuevo."
+        : NETWORK_ERROR_MESSAGE,
+    );
+    failure.status = 0;
+    throw failure;
+  } finally {
+    clearTimeout(timer);
+  }
   if (response.status === 204) return undefined;
-  const result = await response.json();
+  let result;
+  try {
+    result = await response.json();
+  } catch {
+    const failure = new Error(
+      "El servicio no respondió correctamente. Por favor, intenta de nuevo.",
+    );
+    failure.status = response.status;
+    throw failure;
+  }
   if (!response.ok) {
     const error = new Error(result.error || "La solicitud no pudo completarse.");
     error.status = response.status;
@@ -254,7 +284,7 @@ async function loadIdentity() {
     updateConversationView();
     messageInput.focus();
   } catch (error) {
-    if (error.status !== 401 && error.status !== 403) {
+    if (error.status !== 401) {
       authError.textContent = error.message;
       authError.hidden = false;
     }
