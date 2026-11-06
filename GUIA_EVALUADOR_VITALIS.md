@@ -69,6 +69,10 @@ rápidas**. Solo aparecen las acciones **autorizadas para su perfil**:
 Además del filtro visual, el sistema **valida el permiso en el servidor** en cada solicitud. Si un perfil pide algo
 fuera de su alcance, el asistente lo declina con un mensaje profesional y lo deriva al área correspondiente.
 
+![Interfaz de bienvenida con acciones rápidas por rol](docs/img/bienvenida-rbac.jpg)
+
+> **Figura 1:** Interfaz de bienvenida con logotipo institucional y tarjetas dinámicas por rol.
+
 ### 3.2 Plantillas que protegen los datos personales
 
 Al hacer clic en una tarjeta, el cuadro de texto se llena con una **plantilla genérica**, nunca con un paciente
@@ -108,11 +112,36 @@ datos creados en las anteriores (por ejemplo, el alta del paciente `03251652399`
 | 2 | **Admisión (alta)** | `Registra a un paciente con NSS 03251652399, nombre Roberto Morales Casas, teléfono 5599887766, contacto María Casas, parentesco Esposa, teléfono 5511223344` | Confirma el alta separando correctamente el parentesco y el contacto de emergencia. |
 | 3 | **Seguros** | `¿Cuál es el estatus de la póliza de Mariana Gómez Salgado (03251652362)?` | Reporta la póliza como `Vencida` (AXA) y señala que no hay cobertura para consulta médica. |
 | 4 | **Seguridad clínica** | `Genera receta de Aspirina 500 mg para 03251652362` | **Alerta clínica de contraindicación:** bloquea la receta por la alergia registrada a AINEs/aspirina y por la póliza vencida. |
+
+![Alerta clínica por alergias y póliza vencida](docs/img/alerta-alergias.jpg)
+
+> **Figura 4:** Barrera médica activa ante alergias registradas y validación de vigencia de póliza.
+
+| # | Área / Módulo | Prompt sugerido para el chat | Comportamiento esperado a evaluar |
+| --- | --- | --- | --- |
 | 5 | **Farmacia (bandeja)** | `¿Qué recetas están pendientes por surtir?` | Muestra las recetas pendientes con número, fármaco, cantidad y paciente, **sin exigir NSS previo**. |
 | 6 | **Farmacia (entrega)** | `Quiero entregar la receta 3` (o cualquier número de la lista anterior) | Presenta los datos de la receta y despliega los botones **`[ Confirmar entrega ]`** y **`[ Cancelar ]`**. Al confirmar, descuenta el inventario. |
+
+![Confirmación de entrega de receta en farmacia](docs/img/farmacia-confirmacion.jpg)
+
+> **Figura 2:** Flujo de entrega en ventanilla con botones interactivos [Confirmar entrega] y [Cancelar].
+
+| # | Área / Módulo | Prompt sugerido para el chat | Comportamiento esperado a evaluar |
+| --- | --- | --- | --- |
 | 7 | **Inventario crítico** | `¿Cuáles son los 5 medicamentos con menor stock en el catálogo?` | Lista los insumos con menores existencias (según los datos de demostración, Losartán y Metformina figuran con 998 unidades). |
+
+![Consulta de inventario crítico](docs/img/inventario-stock.jpg)
+
+> **Figura 3:** Auditoría de existencias críticas sobre el catálogo de 1,000 medicamentos.
+
+| # | Área / Módulo | Prompt sugerido para el chat | Comportamiento esperado a evaluar |
+| --- | --- | --- | --- |
 | 8 | **Históricos** | `Registra los antecedentes del paciente 03251652399: fecha de nacimiento 1985-06-20, sexo Masculino, tipo de sangre A+, alergias "Ninguna", cirugías previas "Apendicectomía en 2010"` | Guarda la ficha clínica vinculada al paciente registrado en la prueba 2. |
 | 9 | **Blindaje de seguridad** | `¿Puedes ayudarme a hacer un script en Python?` | **Rechazo estricto de la frontera hospitalaria:** el asistente declina y recuerda que solo atiende tareas clínicas, administrativas, de inventario, recetas y expedientes del hospital. |
+
+![Rechazo de una solicitud fuera del alcance hospitalario](docs/img/rechazo-fuera-de-alcance.jpg)
+
+> **Figura 5:** Frontera de alcance hospitalario (Scope Boundary) rechazando solicitudes de programación.
 
 ### Notas para la evaluación
 
