@@ -134,6 +134,17 @@ datos creados en las anteriores (por ejemplo, el alta del paciente `03251652399`
 
 > **Figura 3:** Auditoría de existencias críticas sobre el catálogo de 1,000 medicamentos.
 
+**Origen y alcance del catálogo.** Para construir el catálogo de medicamentos de Vitalis se utilizó como fuente
+una tabla real de medicamentos del **Compendio Nacional de Insumos para la Salud, versión 2025**, emitido por
+el Consejo de Salubridad General del Gobierno de México. Esto proporciona una referencia oficial para los
+medicamentos incluidos; las existencias y cantidades mostradas en esta prueba son datos de demostración de
+Vitalis y no cifras publicadas por el Compendio.
+
+Fuentes oficiales:
+
+- [Medicamentos del Compendio Nacional de Insumos para la Salud 2025 — Consejo de Salubridad General](https://www.gob.mx/csg/articulos/medicamentos-compendio-nacional-de-insumos-para-la-salud-2025).
+- [Acuerdo por el que se emite el Compendio Nacional de Insumos para la Salud versión 2025 — Diario Oficial de la Federación, 26 de abril de 2025](https://dof.gob.mx/2025/SALUD/SALUD_260425.pdf).
+
 | # | Área / Módulo | Prompt sugerido para el chat | Comportamiento esperado a evaluar |
 | --- | --- | --- | --- |
 | 8 | **Históricos** | `Registra los antecedentes del paciente 03251652399: fecha de nacimiento 1985-06-20, sexo Masculino, tipo de sangre A+, alergias "Ninguna", cirugías previas "Apendicectomía en 2010"` | Guarda la ficha clínica vinculada al paciente registrado en la prueba 2. |
