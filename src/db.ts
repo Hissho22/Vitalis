@@ -773,6 +773,47 @@ export async function listarRecetasPendientes(
   );
 }
 
+export const PENDING_RECIPES_MAX_LIMIT = 100;
+
+// Bandeja general de recetas pendientes, sin exigir NSS.
+export async function listarTodasRecetasPendientes(
+  limit = 50,
+): Promise<PatientRecord[]> {
+  const safeLimit = Number.isInteger(limit)
+    ? Math.min(Math.max(limit, 1), PENDING_RECIPES_MAX_LIMIT)
+    : 50;
+  return rows<PatientRecord>(
+    `
+      SELECT TOP (@limite) f.id_receta, f.id_atencion, a.nss, f.medicamento,
+             f.dosis_y_tiempo, f.cantidad, f.estatus_farmacia
+      FROM dbo.farmacia AS f
+      INNER JOIN dbo.atencion AS a ON a.id_atencion = f.id_atencion
+      WHERE f.estatus_farmacia = 'Pendiente'
+      ORDER BY f.id_atencion, f.id_receta;
+    `,
+    { limite: safeLimit },
+  );
+}
+
+export async function consultarRecetaPorId(
+  idReceta: number,
+): Promise<PatientRecord | null> {
+  if (!Number.isInteger(idReceta) || idReceta <= 0) {
+    throw new TypeError("El ID de receta debe ser positivo.");
+  }
+  const result = await rows<PatientRecord>(
+    `
+      SELECT f.id_receta, f.id_atencion, a.nss, f.medicamento,
+             f.dosis_y_tiempo, f.cantidad, f.estatus_farmacia
+      FROM dbo.farmacia AS f
+      INNER JOIN dbo.atencion AS a ON a.id_atencion = f.id_atencion
+      WHERE f.id_receta = @idReceta;
+    `,
+    { idReceta },
+  );
+  return result[0] ?? null;
+}
+
 export async function marcarRecetaEntregada(
   idReceta: number,
   nss: string,

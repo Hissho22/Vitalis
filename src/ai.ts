@@ -17,6 +17,8 @@ import {
   consultarSeguros,
   crearAdmision,
   listarRecetasPendientes,
+  listarTodasRecetasPendientes,
+  consultarRecetaPorId,
   LookupError,
   marcarRecetaEntregada,
   obtenerExpedienteMaster,
@@ -62,7 +64,7 @@ export function buildChatInstructions(
 }
 
 const AUTHORIZATION_DENIAL_INSTRUCTION =
-  "Si una herramienta es rechazada por autorización, informa con tono profesional y hospitalario que el rol actual no permite acceder a esa información o realizar esa acción y deriva al área correspondiente. No reveles nombres de herramientas, funciones, métodos, tablas, campos, variables, errores internos ni otros detalles de implementación. Para preguntas sobre medicamentos con mayor o menor stock usa consultar_inventario_stock. Cuando gestionar_farmacia devuelva confirmationRequest, indica brevemente que debe confirmarse con los botones mostrados; no pidas que el usuario escriba frases de confirmación.";
+  "Si una herramienta es rechazada por autorización, informa con tono profesional y hospitalario que el rol actual no permite acceder a esa información o realizar esa acción y deriva al área correspondiente. No reveles nombres de herramientas, funciones, métodos, tablas, campos, variables, errores internos ni otros detalles de implementación. Para preguntas sobre medicamentos con mayor o menor stock usa consultar_inventario_stock. Para los roles Farmacia y Admin NO es obligatorio exigir el NSS si el usuario ya dio el número de receta o consulta la bandeja general de recetas pendientes: para '¿Qué recetas están pendientes por surtir?' usa gestionar_farmacia con accion 'pendientes' y nss null y muestra id_receta, medicamento, cantidad y paciente; para 'receta 20' usa 'consultar' o, si piden entregarla, 'entregar' con id_receta. Cuando gestionar_farmacia devuelva confirmationRequest, indica brevemente que debe confirmarse con los botones mostrados; no pidas que el usuario escriba frases de confirmación.";
 const MEDICATION_CATALOG_INSTRUCTION =
   "El catálogo es una referencia factual de insumos, descripciones, indicaciones registradas, claves y stock; no es una guía terapéutica. Admin, Médico y Farmacia deben invocar consultar_catalogo_medicamentos antes de contestar cualquier consulta sobre stock o disponibilidad, presentaciones, claves oficiales o indicaciones registradas. Responde sobre estos datos únicamente con resultados devueltos por la herramienta; no inventes ni infieras datos que no estén registrados. No afirmes que careces de acceso al catálogo o inventario ni que no puedes consultarlos. Médico debe identificar cada receta por clave oficial o nombre exacto de insumo e indicar explícitamente la cantidad total de unidades de inventario prescritas. Calcula esa cantidad solo a partir de una pauta y duración explícitamente establecidas; si falta información para determinarla, no la inventes ni emitas una cantidad. El catálogo no contiene una pauta de dosificación: no deduzcas dosis ni tratamientos personalizados de sus resultados; Médico debe seguir el protocolo clínico aprobado y validar alergias. Farmacia únicamente puede dispensar el insumo y la presentación exactamente prescritos para esa atención por el médico tratante; las sustituciones o cambios de formulación están prohibidos. Ante múltiples coincidencias, muestra Clave, Insumo y Descripción de cada candidata, no descuentes stock ni cambies el estatus, y pide confirmar explícitamente la clave que coincide exactamente con la prescripción médica.";
 type JsonRecord = Record<string, unknown>;
@@ -381,12 +383,14 @@ const functionTools: FunctionTool[] = [
   ),
   functionTool(
     "gestionar_farmacia",
-    "Consulta pendientes por identificador exacto del paciente, incluso alfanumérico, o registra una entrega solo después de confirmación física. Dispensa únicamente el insumo/formulación prescritos por el médico para esa atención, sin sustituciones. Si hay varias presentaciones, devuelve candidatos Clave/Insumo/Descripción y requiere confirmación explícita de la clave exacta antes de descontar stock o cambiar el estatus.",
+    "Acción 'pendientes': lista la bandeja general de recetas pendientes (nss null) o las de un paciente. Acción 'consultar': muestra una receta por id_receta sin necesitar NSS. Acción 'entregar': solicita la entrega por id_receta sin necesitar NSS; devuelve confirmationRequest con botones. Dispensa únicamente el insumo/formulación prescritos por el médico para esa atención, sin sustituciones. Si hay varias presentaciones, devuelve candidatos Clave/Insumo/Descripción y requiere confirmación explícita de la clave exacta antes de descontar stock o cambiar el estatus.",
     {
-      accion: { type: "string", enum: ["pendientes", "entregar"] },
-      nss: stringParameter(
-        "Identificador exacto del paciente; se admite texto alfanumérico como DEMO-0001",
-      ),
+      accion: { type: "string", enum: ["pendientes", "consultar", "entregar"] },
+      nss: {
+        type: ["string", "null"],
+        description:
+          "Identificador exacto del paciente (opcional); null para la bandeja general o cuando se indica id_receta",
+      },
       id_receta: { type: ["integer", "null"] },
       clave_medicamento: {
         type: ["string", "null"],
@@ -556,6 +560,8 @@ export function parseMedicalResult(responseText: string): {
 
 export interface PharmacyOperations {
   listPendingRecipes: typeof listarRecetasPendientes;
+  listAllPendingRecipes?: typeof listarTodasRecetasPendientes;
+  findRecipeById?: typeof consultarRecetaPorId;
   markRecipeDelivered: (
     recipeId: number,
     nss: string,
@@ -568,17 +574,62 @@ export async function executePharmacyAction(
   userMessage: string,
   operations: PharmacyOperations = {
     listPendingRecipes: listarRecetasPendientes,
+    listAllPendingRecipes: listarTodasRecetasPendientes,
+    findRecipeById: consultarRecetaPorId,
     markRecipeDelivered: marcarRecetaEntregada,
   },
   uiConfirmed = false,
 ): Promise<string> {
   const action = stringArgument(args, "accion")!;
-  const nss = patientIdentifierArgument(args, "nss");
+  // El NSS es opcional: Farmacia y Admin pueden operar solo con id_receta o con la bandeja general.
+  const rawNss =
+    typeof args.nss === "string" ? args.nss.trim() : "";
+  let nss = rawNss ? patientIdentifierArgument(args, "nss") : "";
   if (action === "pendientes") {
-    return JSON.stringify(await operations.listPendingRecipes(nss), null, 2);
+    return JSON.stringify(
+      nss
+        ? await operations.listPendingRecipes(nss)
+        : await (operations.listAllPendingRecipes ?? listarTodasRecetasPendientes)(),
+      null,
+      2,
+    );
+  }
+  if (action === "consultar") {
+    const recipeId = integerArgument(args, "id_receta");
+    if (recipeId === null) {
+      throw new TypeError("Se requiere id_receta para consultar la receta.");
+    }
+    const recipe = await (operations.findRecipeById ?? consultarRecetaPorId)(recipeId);
+    return JSON.stringify(
+      recipe
+        ? { encontrada: true, receta: recipe }
+        : { encontrada: false, mensaje: `No existe la receta ${recipeId}.` },
+      null,
+      2,
+    );
   }
   if (action === "entregar") {
     const recipeId = integerArgument(args, "id_receta");
+    if (recipeId !== null && !nss) {
+      const recipe = await (operations.findRecipeById ?? consultarRecetaPorId)(recipeId);
+      if (!recipe) {
+        return JSON.stringify({
+          entrega_registrada: false,
+          mensaje: `No existe la receta ${recipeId}.`,
+        });
+      }
+      if (recipe.estatus_farmacia !== "Pendiente") {
+        return JSON.stringify({
+          entrega_registrada: false,
+          mensaje: `La receta ${recipeId} ya no está pendiente.`,
+          receta: recipe,
+        });
+      }
+      nss = String(recipe.nss ?? "").trim();
+    }
+    if (!nss) {
+      throw new TypeError("No se pudo determinar el paciente de la receta.");
+    }
     const selectedMedicationKey =
       args.clave_medicamento === undefined
         ? null
@@ -672,7 +723,9 @@ export async function executePharmacyAction(
       ...delivery,
     });
   }
-  throw new TypeError("La acción debe ser 'pendientes' o 'entregar'.");
+  throw new TypeError(
+    "La acción debe ser 'pendientes', 'consultar' o 'entregar'.",
+  );
 }
 
 function createAgentClient(agentName: string, project: AIProjectClient) {
